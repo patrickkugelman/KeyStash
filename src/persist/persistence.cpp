@@ -153,9 +153,17 @@ ReplayResult replay_file(const std::string& path, uint64_t seq, engine::Store& s
 }  // namespace
 
 Persistence::Persistence(std::string dir, FsyncPolicy policy, uint64_t snapshot_min_wal_bytes)
-    : dir_(std::move(dir)), policy_(policy), snapshot_min_wal_bytes_(snapshot_min_wal_bytes) {}
+    : dir_(std::move(dir)),
+      policy_(policy),
+      snapshot_min_wal_bytes_(snapshot_min_wal_bytes),
+      sync_worker_(std::make_unique<Worker>()),
+      snapshot_worker_(std::make_unique<Worker>()) {}
 
 Persistence::~Persistence() {
+  // Join the workers first: an in-flight snapshot is allowed to finish, and
+  // nothing may use the WAL fd after the final sync below.
+  snapshot_worker_.reset();
+  sync_worker_.reset();
   wal_.close();
   if (lock_fd_ >= 0) ::close(lock_fd_);
 }
@@ -232,34 +240,156 @@ void Persistence::recover(engine::Store& store) {
 }
 
 void Persistence::cron(engine::Store& store) {
-  wal_.sync_if_due();
+  collect_finished_snapshot();
+
+  // `everysec`: the fdatasync runs on the sync worker, one at a time, so a slow
+  // disk never stalls clients.
+  if (wal_.sync_due() && !sync_in_flight_.load(std::memory_order_acquire)) {
+    const int fd = wal_.begin_background_sync();
+    sync_in_flight_.store(true, std::memory_order_release);
+    sync_worker_->submit([this, fd] {
+      fdatasync_or_die(fd, "WAL");
+      ::close(fd);
+      background_syncs_.fetch_add(1, std::memory_order_relaxed);
+      sync_in_flight_.store(false, std::memory_order_release);
+    });
+  }
+
+  // Snapshot once the log outgrows both the minimum and the last snapshot.
   const uint64_t threshold = std::max(snapshot_min_wal_bytes_, snapshot_bytes_);
-  if (snapshot_min_wal_bytes_ == 0 || wal_.size() <= threshold) return;
+  if (snapshot_min_wal_bytes_ == 0 || snapshot_in_progress_ || wal_.size() <= threshold) return;
   if (std::chrono::steady_clock::now() < retry_after_) return;
   std::string error;
-  if (!snapshot(store, &error)) {
-    std::fprintf(stderr, "snapshot failed: %s\n", error.c_str());
+  if (!start_background_snapshot(store, &error)) {
+    std::fprintf(stderr, "snapshot failed to start: %s\n", error.c_str());
     retry_after_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
   }
 }
 
-bool Persistence::snapshot(engine::Store& store, std::string* error) {
+// New writes go to a fresh WAL file from here on; the captured copy covers
+// everything before it. After this returns the store may change freely.
+bool Persistence::begin_snapshot(engine::Store& store, SnapshotBlob* blob, std::string* error) {
+  collect_finished_snapshot();
+  if (snapshot_in_progress_) {
+    *error = "Background save already in progress";
+    return false;
+  }
   wal_.commit();
-  wal_.sync();
-  // New writes go to a fresh file from here on; the snapshot covers all before it.
   const uint64_t new_seq = wal_.seq() + 1;
-  if (!wal_.rotate(new_seq, error)) return false;
+  int old_fd = -1;
+  bool old_unsynced = false;
+  if (!wal_.rotate(new_seq, &old_fd, &old_unsynced, error)) return false;
+  retire_wal_fd(old_fd, old_unsynced);
+  if (wal_.creation_sync_pending()) {
+    wal_.clear_creation_sync_pending();
+    sync_worker_->submit([dir = dir_] { fsync_dir_or_die(dir); });
+  }
 
-  uint64_t bytes = 0;
-  if (!write_snapshot(store, dir_, new_seq, &bytes, error)) return false;
-  snapshot_bytes_ = bytes;
+  const auto start = std::chrono::steady_clock::now();
+  *blob = capture_snapshot(store, new_seq);
+  last_capture_us_ = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start)
+          .count());
+  return true;
+}
 
-  // Truncation: the snapshot is durable, so older WAL files are now redundant.
-  for (const uint64_t seq : list_wal_seqs(dir_)) {
-    if (seq < new_seq) ::unlink(wal_path(dir_, seq).c_str());
+// The rotated-out file may still have unsynced data; sync it off the loop.
+void Persistence::retire_wal_fd(int fd, bool unsynced) {
+  if (!unsynced) {
+    ::close(fd);
+    return;
+  }
+  sync_worker_->submit([fd] {
+    fdatasync_or_die(fd, "rotated WAL");
+    ::close(fd);
+  });
+}
+
+// Truncation: once the snapshot is durable, older WAL files are redundant.
+void Persistence::delete_wal_files_before(uint64_t seq) {
+  for (const uint64_t s : list_wal_seqs(dir_)) {
+    if (s < seq) ::unlink(wal_path(dir_, s).c_str());
   }
   fsync_dir_or_die(dir_);
+}
+
+bool Persistence::snapshot(engine::Store& store, std::string* error) {
+  SnapshotBlob blob;
+  if (!begin_snapshot(store, &blob, error)) return false;
+  const auto start = std::chrono::steady_clock::now();
+  uint64_t bytes = 0;
+  if (!write_snapshot(blob, dir_, &bytes, error)) {
+    ++snapshot_failures_;
+    return false;
+  }
+  delete_wal_files_before(blob.next_wal_seq);
+  snapshot_bytes_ = bytes;
+  last_snapshot_bytes_ = bytes;
+  last_write_ms_ = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start)
+          .count());
+  ++snapshots_completed_;
   return true;
+}
+
+bool Persistence::start_background_snapshot(engine::Store& store, std::string* error) {
+  auto blob = std::make_shared<SnapshotBlob>();
+  if (!begin_snapshot(store, blob.get(), error)) return false;
+  snapshot_in_progress_ = true;
+  snapshot_worker_->submit([this, blob] {
+    const auto start = std::chrono::steady_clock::now();
+    SnapshotResult r;
+    r.ok = write_snapshot(*blob, dir_, &r.file_bytes, &r.error);
+    if (r.ok) delete_wal_files_before(blob->next_wal_seq);
+    r.write_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start)
+            .count());
+    {
+      std::lock_guard<std::mutex> lock(result_mutex_);
+      result_ = std::move(r);
+    }
+    snapshot_done_.store(true, std::memory_order_release);
+  });
+  return true;
+}
+
+void Persistence::collect_finished_snapshot() {
+  if (!snapshot_done_.load(std::memory_order_acquire)) return;
+  SnapshotResult r;
+  {
+    std::lock_guard<std::mutex> lock(result_mutex_);
+    r = std::move(result_);
+  }
+  snapshot_done_.store(false, std::memory_order_release);
+  snapshot_in_progress_ = false;
+  if (r.ok) {
+    snapshot_bytes_ = r.file_bytes;
+    last_snapshot_bytes_ = r.file_bytes;
+    last_write_ms_ = r.write_ms;
+    ++snapshots_completed_;
+    std::fprintf(stderr, "snapshot: %llu bytes written in %llu ms (event loop paused %llu us)\n",
+                 static_cast<unsigned long long>(r.file_bytes),
+                 static_cast<unsigned long long>(r.write_ms),
+                 static_cast<unsigned long long>(last_capture_us_));
+  } else {
+    ++snapshot_failures_;
+    std::fprintf(stderr, "snapshot failed: %s\n", r.error.c_str());
+    retry_after_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  }
+}
+
+PersistStats Persistence::stats() {
+  collect_finished_snapshot();
+  return PersistStats{policy_,
+                      wal_.seq(),
+                      wal_.size(),
+                      snapshot_in_progress_,
+                      snapshots_completed_,
+                      snapshot_failures_,
+                      last_snapshot_bytes_,
+                      last_capture_us_,
+                      last_write_ms_,
+                      background_syncs_.load(std::memory_order_relaxed)};
 }
 
 }  // namespace persist

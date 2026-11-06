@@ -43,6 +43,8 @@ class Dispatcher : public net::CommandExecutor {
   void incr(const Args& args, net::Buffer& out);
   void dbsize(const Args& args, net::Buffer& out);
   void save(const Args& args, net::Buffer& out);
+  void bgsave(const Args& args, net::Buffer& out);
+  void info(const Args& args, net::Buffer& out);
 
   void expire_generic(const Args& args, net::Buffer& out, int64_t unit_ms);
 

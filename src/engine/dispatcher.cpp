@@ -48,8 +48,49 @@ const Dispatcher::Command Dispatcher::kCommands[] = {
     {"expire", 3, &Dispatcher::expire},  {"pexpire", 3, &Dispatcher::pexpire},
     {"ttl", 2, &Dispatcher::ttl},        {"pttl", 2, &Dispatcher::pttl},
     {"incr", 2, &Dispatcher::incr},      {"dbsize", 1, &Dispatcher::dbsize},
-    {"save", 1, &Dispatcher::save},
+    {"save", 1, &Dispatcher::save},      {"bgsave", 1, &Dispatcher::bgsave},
+    {"info", -1, &Dispatcher::info},
 };
+
+void Dispatcher::bgsave(const Args&, net::Buffer& out) {
+  if (persist_ == nullptr) {
+    proto::write_error(out, "ERR persistence is not enabled");
+    return;
+  }
+  std::string error;
+  if (persist_->start_background_snapshot(store_, &error)) {
+    proto::write_simple(out, "Background saving started");
+  } else {
+    proto::write_error(out, "ERR " + error);
+  }
+}
+
+// key:value lines in the style of Redis INFO; mostly for tests and benchmarks.
+void Dispatcher::info(const Args&, net::Buffer& out) {
+  std::string text = "keys:" + std::to_string(store_.size()) + "\r\n";
+  if (persist_ == nullptr) {
+    text += "persistence:off\r\n";
+  } else {
+    const persist::PersistStats s = persist_->stats();
+    const char* policy = s.policy == persist::FsyncPolicy::kAlways     ? "always"
+                         : s.policy == persist::FsyncPolicy::kEverySec ? "everysec"
+                                                                       : "no";
+    auto line = [&text](const char* key, uint64_t value) {
+      text += std::string(key) + ":" + std::to_string(value) + "\r\n";
+    };
+    text += std::string("persistence:on\r\nfsync:") + policy + "\r\n";
+    line("wal_seq", s.wal_seq);
+    line("wal_bytes", s.wal_bytes);
+    line("snapshot_in_progress", s.snapshot_in_progress ? 1 : 0);
+    line("snapshots_completed", s.snapshots_completed);
+    line("snapshot_failures", s.snapshot_failures);
+    line("last_snapshot_bytes", s.last_snapshot_bytes);
+    line("last_snapshot_loop_pause_us", s.last_capture_us);
+    line("last_snapshot_write_ms", s.last_write_ms);
+    line("background_syncs", s.background_syncs);
+  }
+  proto::write_bulk(out, text);
+}
 
 void Dispatcher::commit() {
   if (persist_ != nullptr) persist_->commit();
@@ -70,7 +111,7 @@ void Dispatcher::save(const Args&, net::Buffer& out) {
   if (persist_->snapshot(store_, &error)) {
     proto::write_simple(out, "OK");
   } else {
-    proto::write_error(out, "ERR snapshot failed: " + error);
+    proto::write_error(out, "ERR " + error);
   }
 }
 

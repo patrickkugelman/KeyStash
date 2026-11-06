@@ -66,7 +66,8 @@ bool decode_op(std::string_view p, DecodedOp* op) {
   return false;
 }
 
-void WalWriter::open(const std::string& dir, uint64_t seq, FsyncPolicy policy) {
+void WalWriter::open(const std::string& dir, uint64_t seq, FsyncPolicy policy,
+                     bool defer_creation_sync) {
   close();
   const std::string path = wal_path(dir, seq);
   const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
@@ -78,15 +79,23 @@ void WalWriter::open(const std::string& dir, uint64_t seq, FsyncPolicy policy) {
     throw std::runtime_error("fstat " + path + ": " + why);
   }
   uint64_t size = static_cast<uint64_t>(st.st_size);
+  bool unsynced = false;
+  bool creation_pending = false;
   if (size == 0) {
     std::string header(kWalMagic, sizeof(kWalMagic));
     put_u64(header, seq);
-    if (!write_all(fd, header.data(), header.size()) || ::fdatasync(fd) != 0) {
+    const bool written = write_all(fd, header.data(), header.size());
+    if (!written || (!defer_creation_sync && ::fdatasync(fd) != 0)) {
       const std::string why = errno_text();
       ::close(fd);
       throw std::runtime_error("write header " + path + ": " + why);
     }
-    fsync_dir_or_die(dir);  // make the new file's directory entry durable
+    if (defer_creation_sync) {
+      unsynced = true;  // the periodic sync will cover the header
+      creation_pending = true;
+    } else {
+      fsync_dir_or_die(dir);  // make the new file's directory entry durable
+    }
     size = header.size();
   }
   dir_ = dir;
@@ -94,27 +103,33 @@ void WalWriter::open(const std::string& dir, uint64_t seq, FsyncPolicy policy) {
   fd_ = fd;
   seq_ = seq;
   file_size_ = size;
-  unsynced_ = false;
+  unsynced_ = unsynced;
+  creation_pending_ = creation_pending;
   buf_.clear();
   last_sync_ = std::chrono::steady_clock::now();
 }
 
-bool WalWriter::rotate(uint64_t new_seq, std::string* error) {
+bool WalWriter::rotate(uint64_t new_seq, int* old_fd, bool* old_unsynced, std::string* error) {
   commit();
-  sync();
   WalWriter next;
   try {
-    next.open(dir_, new_seq, policy_);
+    // Under `always` the new file must be durable before any ack, so it is
+    // synced inline; otherwise the caller hands the directory fsync to a worker.
+    next.open(dir_, new_seq, policy_, policy_ != FsyncPolicy::kAlways);
   } catch (const std::exception& e) {
     *error = e.what();
     return false;
   }
-  std::swap(fd_, next.fd_);
-  std::swap(seq_, next.seq_);
-  std::swap(file_size_, next.file_size_);
-  std::swap(unsynced_, next.unsynced_);
-  std::swap(last_sync_, next.last_sync_);
-  return true;  // `next` now holds, and closes, the old file
+  *old_fd = fd_;
+  *old_unsynced = unsynced_;
+  fd_ = next.fd_;
+  seq_ = next.seq_;
+  file_size_ = next.file_size_;
+  unsynced_ = next.unsynced_;
+  creation_pending_ = next.creation_pending_;
+  last_sync_ = next.last_sync_;
+  next.fd_ = -1;  // ownership moved; its destructor must not close it
+  return true;
 }
 
 void WalWriter::close() {
@@ -175,9 +190,17 @@ void WalWriter::sync() {
   last_sync_ = std::chrono::steady_clock::now();
 }
 
-void WalWriter::sync_if_due() {
-  if (policy_ != FsyncPolicy::kEverySec || !unsynced_) return;
-  if (std::chrono::steady_clock::now() - last_sync_ >= std::chrono::seconds(1)) sync();
+bool WalWriter::sync_due() const {
+  return policy_ == FsyncPolicy::kEverySec && unsynced_ &&
+         std::chrono::steady_clock::now() - last_sync_ >= std::chrono::seconds(1);
+}
+
+int WalWriter::begin_background_sync() {
+  const int copy = ::dup(fd_);
+  if (copy < 0) fatal("dup WAL fd: " + errno_text());
+  unsynced_ = false;
+  last_sync_ = std::chrono::steady_clock::now();
+  return copy;
 }
 
 }  // namespace persist

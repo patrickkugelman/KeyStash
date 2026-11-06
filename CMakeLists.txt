@@ -61,6 +61,11 @@ add_executable(kvserver
   src/persist/wal.cpp
   src/persist/snapshot.cpp
   src/persist/persistence.cpp
+  src/persist/worker.cpp
 )
 target_include_directories(kvserver PRIVATE src)
 target_link_libraries(kvserver PRIVATE Threads::Threads)
+
+# Standalone load generator; shares no code with the server.
+add_executable(kvbench src/tools/kvbench.cpp)
+target_link_libraries(kvbench PRIVATE Threads::Threads)

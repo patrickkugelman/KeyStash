@@ -50,47 +50,88 @@ struct Options {
   std::string dir;               // empty: no persistence
   persist::FsyncPolicy fsync = persist::FsyncPolicy::kEverySec;
   uint64_t snapshot_wal_bytes = 64ull << 20;  // 0 disables automatic snapshots
+  bool help = false;
+  bool persistence_flag_given = false;  // --fsync / --snapshot-wal-bytes
 };
 
-bool parse_args(int argc, char** argv, Options* options) {
+const char* const kUsage =
+    "usage: %s [flags]\n"
+    "  --bind ADDR              listen address (default 127.0.0.1)\n"
+    "  --port N                 listen port (default 6379)\n"
+    "  --table custom|std       keyspace hash table (default custom)\n"
+    "  --dir PATH               enable persistence in PATH (default: memory only)\n"
+    "  --fsync POLICY           always | everysec | no (default everysec; needs --dir)\n"
+    "  --snapshot-wal-bytes N   snapshot when the log passes N bytes and the last\n"
+    "                           snapshot's size; 0 = only on SAVE/BGSAVE (default 67108864)\n"
+    "  --help                   show this text\n"
+    "Flags take `--flag value` or `--flag=value`.\n";
+
+template <class T>
+bool parse_number(std::string_view s, T* out) {
+  const char* end = s.data() + s.size();
+  auto [ptr, ec] = std::from_chars(s.data(), end, *out);
+  return ec == std::errc() && ptr == end && !s.empty();
+}
+
+// Returns an error message, or an empty string on success.
+std::string parse_args(int argc, char** argv, Options* options) {
   for (int i = 1; i < argc; ++i) {
-    const std::string_view flag = argv[i];
-    if (i + 1 == argc) return false;
-    const std::string_view value = argv[++i];
+    std::string_view flag = argv[i];
+    if (flag == "--help" || flag == "-h") {
+      options->help = true;
+      return {};
+    }
+    std::string_view value;
+    bool has_value = false;
+    if (const size_t eq = flag.find('='); eq != std::string_view::npos) {
+      value = flag.substr(eq + 1);
+      flag = flag.substr(0, eq);
+      has_value = true;
+    }
+    const bool known = flag == "--port" || flag == "--bind" || flag == "--dir" ||
+                       flag == "--fsync" || flag == "--snapshot-wal-bytes" || flag == "--table";
+    if (!known) return "unknown flag " + std::string(flag);
+    if (!has_value) {
+      if (i + 1 == argc) return "missing value for " + std::string(flag);
+      value = argv[++i];
+    }
+    const std::string bad = "invalid value '" + std::string(value) + "' for " + std::string(flag);
     if (flag == "--port") {
-      const char* end = value.data() + value.size();
-      auto [ptr, ec] = std::from_chars(value.data(), end, options->port);
-      if (ec != std::errc() || ptr != end) return false;
+      if (!parse_number(value, &options->port)) return bad;
     } else if (flag == "--bind") {
       options->bind = std::string(value);
     } else if (flag == "--dir") {
       options->dir = std::string(value);
     } else if (flag == "--fsync") {
-      if (!persist::parse_fsync_policy(value, &options->fsync)) return false;
+      if (!persist::parse_fsync_policy(value, &options->fsync)) return bad;
+      options->persistence_flag_given = true;
     } else if (flag == "--snapshot-wal-bytes") {
-      const char* end = value.data() + value.size();
-      auto [ptr, ec] = std::from_chars(value.data(), end, options->snapshot_wal_bytes);
-      if (ec != std::errc() || ptr != end) return false;
+      if (!parse_number(value, &options->snapshot_wal_bytes)) return bad;
+      options->persistence_flag_given = true;
     } else if (flag == "--table") {
-      if (value != "custom" && value != "std") return false;
+      if (value != "custom" && value != "std") return bad;
       options->table = std::string(value);
-    } else {
-      return false;
     }
   }
-  return true;
+  if (options->persistence_flag_given && options->dir.empty()) {
+    return "--fsync and --snapshot-wal-bytes need --dir";
+  }
+  return {};
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
   Options options;
-  if (!parse_args(argc, argv, &options)) {
-    std::fprintf(stderr,
-                 "usage: %s [--bind ADDR] [--port N] [--table custom|std]\n"
-                 "          [--dir PATH] [--fsync always|everysec|no] [--snapshot-wal-bytes N]\n",
-                 argv[0]);
+  const std::string problem = parse_args(argc, argv, &options);
+  if (!problem.empty()) {
+    std::fprintf(stderr, "error: %s\n", problem.c_str());
+    std::fprintf(stderr, kUsage, argv[0]);
     return 2;
+  }
+  if (options.help) {
+    std::printf(kUsage, argv[0]);
+    return 0;
   }
   try {
     signal(SIGPIPE, SIG_IGN);
@@ -111,6 +152,13 @@ int main(int argc, char** argv) {
     if (persistence) persistence->recover(dispatcher.store());
     loop.set_periodic(100, [&dispatcher] { return dispatcher.cron(); });
     net::Server server(loop, dispatcher, options.bind, options.port);
+    std::fprintf(stderr, "config: table=%s dir=%s fsync=%s snapshot-wal-bytes=%llu\n",
+                 options.table.c_str(), options.dir.empty() ? "(none)" : options.dir.c_str(),
+                 options.dir.empty() ? "n/a"
+                 : options.fsync == persist::FsyncPolicy::kAlways     ? "always"
+                 : options.fsync == persist::FsyncPolicy::kEverySec ? "everysec"
+                                                                    : "no",
+                 static_cast<unsigned long long>(options.snapshot_wal_bytes));
     std::fprintf(stderr, "listening on %s:%u\n", options.bind.c_str(),
                  static_cast<unsigned>(options.port));
     loop.run();

@@ -13,51 +13,40 @@
 namespace persist {
 namespace {
 
-constexpr size_t kFlushAt = 1 << 20;
-
-// Buffered output that keeps a running CRC of what it was given.
-class SnapshotOut {
- public:
-  explicit SnapshotOut(int fd) : fd_(fd) { buf_.reserve(kFlushAt + 4096); }
-
-  void put(const char* p, size_t n) {
-    crc_ = crc32(p, n, crc_);
-    buf_.append(p, n);
-  }
-  void put_u32v(uint32_t v) {
-    std::string s;
-    put_u32(s, v);
-    put(s.data(), s.size());
-  }
-  void put_u64v(uint64_t v) {
-    std::string s;
-    put_u64(s, v);
-    put(s.data(), s.size());
-  }
-  // Appends without checksumming (the CRC field itself).
-  void put_raw_u32(uint32_t v) { put_u32(buf_, v); }
-
-  bool maybe_flush() { return buf_.size() < kFlushAt || flush(); }
-  bool flush() {
-    if (!write_all(fd_, buf_.data(), buf_.size())) return false;
-    total_ += buf_.size();
-    buf_.clear();
-    return true;
-  }
-  uint32_t crc() const { return crc_; }
-  uint64_t total() const { return total_; }
-
- private:
-  int fd_;
-  std::string buf_;
-  uint32_t crc_ = 0;
-  uint64_t total_ = 0;
-};
+constexpr size_t kChunkSize = 1 << 20;
 
 }  // namespace
 
-bool write_snapshot(engine::Store& store, const std::string& dir, uint64_t next_wal_seq,
-                    uint64_t* bytes, std::string* error) {
+SnapshotBlob capture_snapshot(engine::Store& store, uint64_t next_wal_seq) {
+  SnapshotBlob blob;
+  blob.next_wal_seq = next_wal_seq;
+
+  std::string chunk;
+  chunk.reserve(kChunkSize + 4096);
+  chunk.append(kSnapshotMagic, sizeof(kSnapshotMagic));
+  put_u64(chunk, next_wal_seq);
+
+  store.for_each_live([&](std::string_view key, const engine::Entry& entry) {
+    put_u32(chunk, static_cast<uint32_t>(key.size()));
+    chunk.append(key);
+    put_u32(chunk, static_cast<uint32_t>(entry.value.size()));
+    chunk.append(entry.value);
+    put_u64(chunk, static_cast<uint64_t>(entry.expire_at_ms));
+    ++blob.count;
+    if (chunk.size() >= kChunkSize) {
+      blob.bytes += chunk.size();
+      blob.chunks.push_back(std::move(chunk));
+      chunk = std::string();
+      chunk.reserve(kChunkSize + 4096);
+    }
+  });
+  blob.bytes += chunk.size();
+  blob.chunks.push_back(std::move(chunk));
+  return blob;
+}
+
+bool write_snapshot(const SnapshotBlob& blob, const std::string& dir, uint64_t* file_bytes,
+                    std::string* error) {
   const std::string tmp = dir + "/snapshot.tmp";
   const std::string final_path = dir + "/snapshot.bin";
   const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
@@ -72,27 +61,18 @@ bool write_snapshot(engine::Store& store, const std::string& dir, uint64_t next_
     return false;
   };
 
-  SnapshotOut out(fd);
-  out.put(kSnapshotMagic, sizeof(kSnapshotMagic));
-  out.put_u64v(next_wal_seq);
-  uint64_t count = 0;
-  bool io_ok = true;
-  store.for_each_live([&](std::string_view key, const engine::Entry& entry) {
-    if (!io_ok) return;
-    out.put_u32v(static_cast<uint32_t>(key.size()));
-    out.put(key.data(), key.size());
-    out.put_u32v(static_cast<uint32_t>(entry.value.size()));
-    out.put(entry.value.data(), entry.value.size());
-    out.put_u64v(static_cast<uint64_t>(entry.expire_at_ms));
-    ++count;
-    io_ok = out.maybe_flush();
-  });
-  if (!io_ok) return fail("write snapshot");
+  uint32_t crc = 0;
+  for (const std::string& chunk : blob.chunks) {
+    crc = crc32(chunk.data(), chunk.size(), crc);
+    if (!write_all(fd, chunk.data(), chunk.size())) return fail("write snapshot");
+  }
+  std::string footer;
+  put_u32(footer, kSnapshotFooterMarker);
+  put_u64(footer, blob.count);
+  crc = crc32(footer.data(), footer.size(), crc);  // the CRC covers the marker and count
+  put_u32(footer, crc);
+  if (!write_all(fd, footer.data(), footer.size())) return fail("write snapshot");
 
-  out.put_u32v(kSnapshotFooterMarker);
-  out.put_u64v(count);
-  out.put_raw_u32(out.crc());
-  if (!out.flush()) return fail("write snapshot");
   if (::fsync(fd) != 0) return fail("fsync snapshot");
   if (::close(fd) != 0) {
     *error = "close snapshot: " + errno_text();
@@ -105,7 +85,7 @@ bool write_snapshot(engine::Store& store, const std::string& dir, uint64_t next_
     return false;
   }
   fsync_dir_or_die(dir);
-  *bytes = out.total();
+  *file_bytes = blob.bytes + footer.size();
   return true;
 }
 

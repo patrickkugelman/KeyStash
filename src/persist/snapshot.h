@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "engine/store.h"
 
@@ -15,10 +16,23 @@ inline constexpr char kSnapshotMagic[8] = {'K', 'V', 'S', 'N', 'A', 'P', '0', '1
 inline constexpr uint32_t kSnapshotFooterMarker = 0xFFFFFFFFu;
 inline constexpr uint32_t kMaxSnapshotString = 512u * 1024u * 1024u;
 
+// A point-in-time copy of the keyspace, serialized in memory. Capturing is
+// the only part that touches the live store; it does no I/O and no
+// checksumming, so the event loop is paused for roughly a memory copy.
+struct SnapshotBlob {
+  uint64_t next_wal_seq = 0;
+  uint64_t count = 0;
+  uint64_t bytes = 0;
+  std::vector<std::string> chunks;  // header + entries, in file order
+};
+
+SnapshotBlob capture_snapshot(engine::Store& store, uint64_t next_wal_seq);
+
 // Writes `<dir>/snapshot.tmp`, syncs it and renames it over `<dir>/snapshot.bin`.
-// Returns false with `error` set on I/O failure, leaving any old snapshot intact.
-bool write_snapshot(engine::Store& store, const std::string& dir, uint64_t next_wal_seq,
-                    uint64_t* bytes, std::string* error);
+// Thread-safe with respect to the store (it never touches it). Returns false
+// with `error` set on I/O failure, leaving any old snapshot intact.
+bool write_snapshot(const SnapshotBlob& blob, const std::string& dir, uint64_t* file_bytes,
+                    std::string* error);
 
 // Loads into `store`. Throws std::runtime_error if the file is damaged.
 void load_snapshot(const std::string& path, engine::Store& store, uint64_t* next_wal_seq,

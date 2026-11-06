@@ -45,11 +45,17 @@ class WalWriter {
   WalWriter(const WalWriter&) = delete;
   WalWriter& operator=(const WalWriter&) = delete;
 
-  // Opens `seq` for appending, creating it with a header if absent.
-  // Throws std::runtime_error if it cannot.
-  void open(const std::string& dir, uint64_t seq, FsyncPolicy policy);
-  // Switches to a fresh file `new_seq`. Returns false (nothing changed) on failure.
-  bool rotate(uint64_t new_seq, std::string* error);
+  // Opens `seq` for appending, creating it with a header if absent. A new
+  // file is normally made durable (fdatasync + directory fsync) before this
+  // returns; with `defer_creation_sync` that is left to the caller, see
+  // creation_sync_pending(). Throws std::runtime_error if it cannot.
+  void open(const std::string& dir, uint64_t seq, FsyncPolicy policy,
+            bool defer_creation_sync = false);
+  // Switches to a fresh file `new_seq`. On success the old file is NOT closed:
+  // the caller gets its fd (and whether it still needs an fdatasync) and must
+  // sync/close it, possibly on another thread. Returns false (nothing
+  // changed) on failure.
+  bool rotate(uint64_t new_seq, int* old_fd, bool* old_unsynced, std::string* error);
   void close();
 
   void append_set(std::string_view key, std::string_view value, bool keep_ttl);
@@ -58,10 +64,19 @@ class WalWriter {
 
   // Writes buffered records; fdatasyncs under `always`.
   void commit();
-  // fdatasync if anything written is not yet synced.
+  // fdatasync now, on the calling thread, if anything written is not yet synced.
   void sync();
-  // `everysec`: sync when a second has passed since the last sync.
-  void sync_if_due();
+  // `everysec`: true when written data has been unsynced for over a second.
+  bool sync_due() const;
+  // Marks everything written so far as being synced and returns a dup of the
+  // fd. The caller must fdatasync and close it (on any thread); the dup keeps
+  // it valid even if this writer rotates meanwhile.
+  int begin_background_sync();
+
+  // True after a deferred creation: the directory entry still needs an fsync
+  // of the directory. The file's data is covered by the normal sync policy.
+  bool creation_sync_pending() const { return creation_pending_; }
+  void clear_creation_sync_pending() { creation_pending_ = false; }
 
   uint64_t seq() const { return seq_; }
   uint64_t size() const { return file_size_ + buf_.size(); }
@@ -75,6 +90,7 @@ class WalWriter {
   uint64_t seq_ = 0;
   uint64_t file_size_ = 0;
   bool unsynced_ = false;
+  bool creation_pending_ = false;
   std::string buf_;
   std::chrono::steady_clock::time_point last_sync_{};
 };
