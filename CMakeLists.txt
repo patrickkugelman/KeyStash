@@ -47,6 +47,14 @@ endif()
 
 find_package(Threads REQUIRED)
 
-add_executable(kvserver src/main.cpp)
+add_executable(kvserver
+  src/main.cpp
+  src/net/event_loop.cpp
+  src/net/connection.cpp
+  src/net/server.cpp
+  src/proto/resp.cpp
+  src/engine/store.cpp
+  src/engine/dispatcher.cpp
+)
 target_include_directories(kvserver PRIVATE src)
 target_link_libraries(kvserver PRIVATE Threads::Threads)
