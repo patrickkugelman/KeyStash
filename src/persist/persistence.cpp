@@ -40,7 +40,7 @@ std::vector<uint64_t> list_wal_seqs(const std::string& dir) {
   return seqs;
 }
 
-// True if a record with a valid checksum starts at `offset`.
+// is there a record with a good checksum at offset
 bool valid_record_at(int fd, uint64_t offset, uint64_t file_size) {
   char head[8];
   if (offset + 8 > file_size || ::pread(fd, head, 8, static_cast<off_t>(offset)) != 8) return false;
@@ -63,8 +63,8 @@ bool valid_record_at(int fd, uint64_t offset, uint64_t file_size) {
 
 struct ReplayResult {
   uint64_t records = 0;
-  uint64_t good_end = 0;     // bytes of the file to keep
-  uint64_t dropped = 0;      // torn tail bytes to cut off
+  uint64_t good_end = 0;     // bytes to keep
+  uint64_t dropped = 0;      // torn bytes to cut
   std::string torn_reason;   // empty if the file was clean
   bool header_missing = false;
 };
@@ -78,8 +78,8 @@ void apply(engine::Store& store, const DecodedOp& op) {
   }
 }
 
-// Replays one WAL file. Only the final file may end in a torn record; any
-// other damage throws, because continuing would silently lose data.
+// replay one wal file. only the last file may have a torn tail, any other
+// damage throws since going on would lose data silently
 ReplayResult replay_file(const std::string& path, uint64_t seq, engine::Store& store,
                          bool is_last) {
   const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
@@ -95,7 +95,7 @@ ReplayResult replay_file(const std::string& path, uint64_t seq, engine::Store& s
 
   if (!in.ensure(kWalHeaderSize)) {
     if (!is_last) throw std::runtime_error(path + ": header is truncated in a non-final WAL file");
-    result.header_missing = true;  // crashed while creating it; nothing was logged
+    result.header_missing = true;  // crashed while creating it
     result.dropped = size;
     return result;
   }
@@ -129,8 +129,8 @@ ReplayResult replay_file(const std::string& path, uint64_t seq, engine::Store& s
     uint32_t crc = crc32(in.data(), 4);
     crc = crc32(in.data() + 8, len, crc);
     if (crc != stored_crc) {
-      // A tear damages only the end of the file. A valid record after the bad
-      // one means the damage is in the middle, which we must not skip over.
+      // a tear only hurts the end of the file. if a good record follows,
+      // the damage is in the middle and we must not skip it
       if (end < size && valid_record_at(fd, end, size)) {
         throw std::runtime_error(path + ": corrupt record at offset " + std::to_string(off) +
                                  " is followed by valid records; refusing to drop them");
@@ -160,8 +160,7 @@ Persistence::Persistence(std::string dir, FsyncPolicy policy, uint64_t snapshot_
       snapshot_worker_(std::make_unique<Worker>()) {}
 
 Persistence::~Persistence() {
-  // Join the workers first: an in-flight snapshot is allowed to finish, and
-  // nothing may use the WAL fd after the final sync below.
+  // workers first, a running snapshot gets to finish
   snapshot_worker_.reset();
   sync_worker_.reset();
   wal_.close();
@@ -177,7 +176,7 @@ void Persistence::recover(engine::Store& store) {
   if (::flock(lock_fd_, LOCK_EX | LOCK_NB) != 0) {
     throw std::runtime_error("data directory " + dir_ + " is in use by another process");
   }
-  ::unlink((dir_ + "/snapshot.tmp").c_str());  // an unfinished snapshot is garbage
+  ::unlink((dir_ + "/snapshot.tmp").c_str());  // left over from a crash
 
   uint64_t next_seq = 1;
   uint64_t snapshot_entries = 0;
@@ -191,7 +190,7 @@ void Persistence::recover(engine::Store& store) {
 
   std::vector<uint64_t> seqs = list_wal_seqs(dir_);
   size_t stale = 0;
-  while (!seqs.empty() && seqs.front() < next_seq) {  // snapshot already covers them
+  while (!seqs.empty() && seqs.front() < next_seq) {  // covered by the snapshot
     ::unlink(wal_path(dir_, seqs.front()).c_str());
     seqs.erase(seqs.begin());
     ++stale;
@@ -242,8 +241,7 @@ void Persistence::recover(engine::Store& store) {
 void Persistence::cron(engine::Store& store) {
   collect_finished_snapshot();
 
-  // `everysec`: the fdatasync runs on the sync worker, one at a time, so a slow
-  // disk never stalls clients.
+  // everysec: fdatasync on the worker, one at a time
   if (wal_.sync_due() && !sync_in_flight_.load(std::memory_order_acquire)) {
     const int fd = wal_.begin_background_sync();
     sync_in_flight_.store(true, std::memory_order_release);
@@ -255,7 +253,7 @@ void Persistence::cron(engine::Store& store) {
     });
   }
 
-  // Snapshot once the log outgrows both the minimum and the last snapshot.
+  // snapshot when the wal is bigger than the minimum and the last snapshot
   const uint64_t threshold = std::max(snapshot_min_wal_bytes_, snapshot_bytes_);
   if (snapshot_min_wal_bytes_ == 0 || snapshot_in_progress_ || wal_.size() <= threshold) return;
   if (std::chrono::steady_clock::now() < retry_after_) return;
@@ -266,8 +264,7 @@ void Persistence::cron(engine::Store& store) {
   }
 }
 
-// New writes go to a fresh WAL file from here on; the captured copy covers
-// everything before it. After this returns the store may change freely.
+// new writes go to a new wal from here, the copy covers everything before
 bool Persistence::begin_snapshot(engine::Store& store, SnapshotBlob* blob, std::string* error) {
   collect_finished_snapshot();
   if (snapshot_in_progress_) {
@@ -293,7 +290,7 @@ bool Persistence::begin_snapshot(engine::Store& store, SnapshotBlob* blob, std::
   return true;
 }
 
-// The rotated-out file may still have unsynced data; sync it off the loop.
+// the old file can still have unsynced data, sync it on the worker
 void Persistence::retire_wal_fd(int fd, bool unsynced) {
   if (!unsynced) {
     ::close(fd);
@@ -305,7 +302,7 @@ void Persistence::retire_wal_fd(int fd, bool unsynced) {
   });
 }
 
-// Truncation: once the snapshot is durable, older WAL files are redundant.
+// snapshot is durable, the older wal files can go
 void Persistence::delete_wal_files_before(uint64_t seq) {
   for (const uint64_t s : list_wal_seqs(dir_)) {
     if (s < seq) ::unlink(wal_path(dir_, s).c_str());

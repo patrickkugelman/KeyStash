@@ -21,7 +21,7 @@
 
 namespace {
 
-// Turns SIGINT/SIGTERM into a clean loop exit.
+// SIGINT/SIGTERM stop the loop
 class SignalWatcher : public net::EventHandler {
  public:
   explicit SignalWatcher(net::EventLoop& loop) : loop_(loop) {
@@ -47,11 +47,11 @@ struct Options {
   std::string bind = "127.0.0.1";
   uint16_t port = 6379;
   std::string table = "custom";  // custom | std
-  std::string dir;               // empty: no persistence
+  std::string dir;               // empty = no persistence
   persist::FsyncPolicy fsync = persist::FsyncPolicy::kEverySec;
-  uint64_t snapshot_wal_bytes = 64ull << 20;  // 0 disables automatic snapshots
+  uint64_t snapshot_wal_bytes = 64ull << 20;  // 0 = no automatic snapshots
   bool help = false;
-  bool persistence_flag_given = false;  // --fsync / --snapshot-wal-bytes
+  bool persistence_flag_given = false;  // --fsync or --snapshot-wal-bytes was passed
 };
 
 const char* const kUsage =
@@ -73,7 +73,7 @@ bool parse_number(std::string_view s, T* out) {
   return ec == std::errc() && ptr == end && !s.empty();
 }
 
-// Returns an error message, or an empty string on success.
+// returns an error message, empty if all is well
 std::string parse_args(int argc, char** argv, Options* options) {
   for (int i = 1; i < argc; ++i) {
     std::string_view flag = argv[i];

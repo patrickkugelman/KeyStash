@@ -8,9 +8,9 @@
 
 namespace engine {
 
-// Chained hash table with two bucket arrays and incremental rehashing: a
-// resize moves a few buckets per operation instead of stalling on one big
-// copy. Nodes are relinked, never copied, so Entry pointers stay stable.
+// chained table with two bucket arrays. a resize moves a few buckets per
+// call instead of copying everything at once. nodes are relinked, not
+// copied, so Entry pointers stay valid
 class HashTable : public Table {
  public:
   HashTable() = default;
@@ -34,7 +34,7 @@ class HashTable : public Table {
   };
   struct Buckets {
     std::unique_ptr<Node*[]> slots;
-    size_t size = 0;  // power of two, or 0 when unallocated
+    size_t size = 0;  // power of two, 0 = not allocated
     size_t used = 0;
   };
 
@@ -45,8 +45,8 @@ class HashTable : public Table {
   void start_rehash(size_t new_size);
   bool rehash_step(size_t buckets);
 
-  Buckets tables_[2];  // [1] is the rehash target while rehashing_
-  size_t rehash_idx_ = 0;  // next bucket of tables_[0] to move
+  Buckets tables_[2];  // [1] is the target while rehashing_
+  size_t rehash_idx_ = 0;  // next bucket of [0] to move
   bool rehashing_ = false;
 };
 

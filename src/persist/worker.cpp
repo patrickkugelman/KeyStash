@@ -27,7 +27,7 @@ void Worker::run() {
   std::unique_lock<std::mutex> lock(mutex_);
   while (true) {
     wake_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
-    if (queue_.empty()) return;  // stopping and drained
+    if (queue_.empty()) return;  // stopping, nothing left
     std::function<void()> task = std::move(queue_.front());
     queue_.pop_front();
     lock.unlock();

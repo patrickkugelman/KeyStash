@@ -23,21 +23,20 @@ struct PersistStats {
   uint64_t snapshots_completed;
   uint64_t snapshot_failures;
   uint64_t last_snapshot_bytes;
-  uint64_t last_capture_us;   // event loop pause for the last snapshot
-  uint64_t last_write_ms;     // background write time of the last snapshot
-  uint64_t background_syncs;  // fdatasyncs done off the event loop
+  uint64_t last_capture_us;   // how long the loop was paused
+  uint64_t last_write_ms;     // how long the worker took to write
+  uint64_t background_syncs;  // fdatasyncs done by the sync worker
 };
 
-// Owns the data directory: WAL files, snapshot, and the directory lock.
-//   wal-<seq>.log   append-only log, rotated by each snapshot
-//   snapshot.bin    full state as of the rotation that created wal-<next_wal_seq>
-// Recovery = snapshot + every WAL file with seq >= next_wal_seq, in order.
+// the data dir: wal-<seq>.log files and snapshot.bin
+// snapshot.bin covers every wal before wal-<next_wal_seq>
+// recovery = snapshot + the wal files from next_wal_seq on
 //
-// Threading: every public method runs on the event-loop thread. Two worker
-// threads do blocking disk work and never touch the store or the WAL writer:
-//   sync worker      fdatasync for `everysec` and for rotated-out WAL files
-//   snapshot worker  writes snapshot.bin and then deletes the WAL files it covers
-// They are separate so a slow snapshot write cannot delay the 1 s fsync.
+// public methods run on the loop thread only. two workers do the blocking
+// disk work and never touch the store or the wal writer:
+//   sync worker      fdatasync for everysec and for rotated-out wal files
+//   snapshot worker  writes snapshot.bin, then deletes the wal files it covers
+// separate threads so a slow snapshot can't hold up the 1s fsync
 class Persistence {
  public:
   Persistence(std::string dir, FsyncPolicy policy, uint64_t snapshot_min_wal_bytes);
@@ -45,9 +44,8 @@ class Persistence {
   Persistence(const Persistence&) = delete;
   Persistence& operator=(const Persistence&) = delete;
 
-  // Locks the directory, loads the snapshot, replays the WAL (dropping a torn
-  // final record) and opens the WAL for appending. Throws std::runtime_error
-  // for anything it cannot safely recover from.
+  // lock the dir, load the snapshot, replay the wal (a torn last record is
+  // cut off), open the wal for appending. throws if it can't recover safely
   void recover(engine::Store& store);
 
   void log_set(std::string_view key, std::string_view value) { wal_.append_set(key, value, false); }
@@ -57,26 +55,22 @@ class Persistence {
   void log_del(std::string_view key) { wal_.append_del(key); }
   void log_expire_at(std::string_view key, int64_t when_ms) { wal_.append_expire_at(key, when_ms); }
 
-  // Makes everything logged so far durable per the fsync policy
-  // (`always`: fdatasync here; otherwise just write to the OS).
+  // always: write + fdatasync here, otherwise just write to the OS
   void commit() { wal_.commit(); }
 
-  // Periodic work: schedules the `everysec` fdatasync, collects finished
-  // snapshots, starts automatic ones.
+  // everysec sync, finished snapshots, automatic snapshots
   void cron(engine::Store& store);
 
-  // SAVE: capture, write and truncate before returning. The event loop is
-  // blocked for the whole time.
+  // SAVE, blocks the loop until it is done
   bool snapshot(engine::Store& store, std::string* error);
 
-  // BGSAVE: the event loop only rotates the WAL and captures the data in
-  // memory; the snapshot worker writes it out.
+  // BGSAVE, the loop rotates the wal and copies the data, the worker writes it
   bool start_background_snapshot(engine::Store& store, std::string* error);
 
   PersistStats stats();
 
  private:
-  // Rotates the WAL and captures the store. Fails if a snapshot is running.
+  // rotate + capture, fails if a snapshot is already running
   bool begin_snapshot(engine::Store& store, SnapshotBlob* blob, std::string* error);
   void retire_wal_fd(int fd, bool unsynced);
   void delete_wal_files_before(uint64_t seq);
@@ -102,10 +96,10 @@ class Persistence {
   std::atomic<bool> sync_in_flight_{false};
   std::atomic<uint64_t> background_syncs_{0};
 
-  bool snapshot_in_progress_ = false;           // event-loop thread only
-  std::atomic<bool> snapshot_done_{false};      // set by the worker, cleared by the loop
+  bool snapshot_in_progress_ = false;           // loop thread only
+  std::atomic<bool> snapshot_done_{false};      // set by the worker
   std::mutex result_mutex_;
-  SnapshotResult result_;                       // guarded by result_mutex_
+  SnapshotResult result_;                       // under result_mutex_
   uint64_t snapshots_completed_ = 0;
   uint64_t snapshot_failures_ = 0;
   uint64_t last_snapshot_bytes_ = 0;

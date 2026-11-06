@@ -34,8 +34,7 @@ void Connection::on_event(uint32_t events) {
   server_.defer(this);
 }
 
-// One read per wakeup: level triggering re-reports any remainder, so a busy
-// client cannot starve the others.
+// one read per wakeup, epoll reports the rest again
 bool Connection::read_input() {
   const auto scratch = server_.read_scratch();
   const ssize_t n = ::read(fd_, scratch.first, scratch.second);
@@ -67,7 +66,7 @@ void Connection::process_input() {
   paused_ = true;
 }
 
-// One send per wakeup; a short write stays queued until EPOLLOUT fires.
+// one send per wakeup, a short write waits for EPOLLOUT
 bool Connection::flush_output() {
   if (out_.empty()) return true;
   const ssize_t n = ::send(fd_, out_.data(), out_.size(), MSG_NOSIGNAL);
@@ -92,9 +91,8 @@ void Connection::finish() {
       return;
     }
     if (!paused_ || out_.size() > kOutLowWater) break;
-    // Drained enough to resume. Stay here while buffered requests can run:
-    // no new EPOLLIN will announce them. Their effects must be durable
-    // before the next flush sends the replies.
+    // run the buffered requests now, no EPOLLIN will come for them
+    // commit before the next flush so replies never get ahead of the log
     paused_ = false;
     if (!close_after_flush_) process_input();
     executor_.commit();
@@ -108,9 +106,9 @@ void Connection::finish() {
 
 void Connection::update_interest() {
   uint32_t wanted = 0;
-  // After FIN the socket stays readable forever, so level triggering would spin.
-  // Keep reading while paused: a client that writes its whole pipeline before
-  // reading any reply would otherwise deadlock against us.
+  // after FIN the fd is readable forever, polling it would spin
+  // keep reading while paused, otherwise a client that sends its whole
+  // pipeline before reading replies deadlocks
   if (!peer_done_ && !close_after_flush_ && in_.size() < proto::kMaxRequest) wanted |= kIn;
   if (!out_.empty()) wanted |= kOut;
   if (wanted != interest_) {

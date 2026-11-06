@@ -71,7 +71,7 @@ Entry* HashTable::find_or_insert(std::string_view key, bool* inserted) {
       start_rehash(next_pow2(tables_[0].used * 2));
     }
   }
-  // New keys go to the target table so the old one only drains.
+  // new keys go to the target so the old table only drains
   Buckets& dst = rehashing_ ? tables_[1] : tables_[0];
   Node*& head = dst.slots[hash & (dst.size - 1)];
   head = new Node{head, hash, std::string(key), Entry{}};
@@ -99,14 +99,14 @@ bool HashTable::erase(std::string_view key) {
   return false;
 }
 
-// Below 1/8 load, shrink to 2x the live count so a refill does not regrow at once.
+// under 1/8 full: shrink to 2x the live count so it doesn't regrow right away
 void HashTable::maybe_shrink() {
   if (!rehashing_ && tables_[0].size > kInitialSize && tables_[0].used * 8 < tables_[0].size) {
     start_rehash(next_pow2(tables_[0].used * 2));
   }
 }
 
-// Every node sits in exactly one of the two tables, even mid-rehash.
+// a node is in exactly one table, even mid rehash
 void HashTable::for_each(const std::function<void(std::string_view, const Entry&)>& fn) const {
   for (const Buckets& b : tables_) {
     for (size_t i = 0; i < b.size; ++i) {
@@ -125,7 +125,7 @@ bool HashTable::rehash_step(size_t buckets) {
   if (!rehashing_) return false;
   Buckets& from = tables_[0];
   Buckets& to = tables_[1];
-  size_t empty_visits = buckets * 10;  // bounds the work spent skipping holes
+  size_t empty_visits = buckets * 10;  // limit on empty buckets skipped
   while (buckets > 0 && from.used > 0) {
     while (from.slots[rehash_idx_] == nullptr) {
       ++rehash_idx_;
@@ -149,7 +149,7 @@ bool HashTable::rehash_step(size_t buckets) {
   tables_[1] = Buckets{};
   rehashing_ = false;
   rehash_idx_ = 0;
-  // Deletes during the rehash may have left the new table too big already.
+  // deletes during the rehash can leave the new table too big
   maybe_shrink();
   return rehashing_;
 }

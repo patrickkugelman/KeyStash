@@ -6,7 +6,7 @@
 
 namespace engine {
 
-// Strict decimal int64 like Redis: no '+', spaces, leading zeros or "-0".
+// strict int64 like redis: no '+', spaces, leading zeros or "-0"
 inline bool parse_int64(std::string_view s, int64_t* out) {
   if (s.empty() || s.size() > 20) return false;
   const bool negative = s[0] == '-';

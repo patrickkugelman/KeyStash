@@ -1,9 +1,9 @@
-// Closed-loop load generator for RESP servers: ops/sec and latency percentiles.
+// closed-loop load generator for RESP servers: ops/sec and latency percentiles
 //
-// Each client thread owns one connection and repeats: send `pipeline` commands,
-// wait for all replies. Latency is that round trip, measured per batch (for
-// pipeline 1 it is per command). Closed-loop clients slow down when the server
-// does, so tail latency under overload is understated (coordinated omission).
+// every client thread has one connection and loops: send `pipeline` commands,
+// wait for all the replies. latency is that round trip (per command when
+// pipeline is 1). clients slow down when the server does, so tail latency
+// under overload looks better than it really is
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -34,14 +34,14 @@ struct Config {
   std::string host = "127.0.0.1";
   uint16_t port = 6379;
   int clients = 50;
-  uint64_t requests = 1000000;  // total commands across all clients
+  uint64_t requests = 1000000;  // total over all clients
   int pipeline = 1;
   size_t value_size = 64;
   uint64_t keyspace = 100000;
   std::string mode = "mixed";   // set | get | incr | mixed
-  int set_percent = 50;         // for mixed
-  bool preload = false;         // fill the keyspace first (untimed)
-  std::string side_command;     // sent once on its own connection mid-run
+  int set_percent = 50;         // sets in mixed mode
+  bool preload = false;         // fill the keyspace first, not timed
+  std::string side_command;     // sent once mid-run on its own connection
   int side_after_ms = 0;
   uint64_t seed = 1;
 };
@@ -94,8 +94,8 @@ bool send_all(int fd, const char* p, size_t n) {
   return true;
 }
 
-// Bytes taken by the one complete reply at p, 0 if incomplete, -1 if malformed.
-// Only the reply types these commands can produce.
+// length of the reply at p: 0 = need more bytes, -1 = garbage
+// only handles the reply types these commands give back
 ptrdiff_t reply_length(const char* p, size_t n) {
   if (n == 0) return 0;
   const void* nl = std::memchr(p, '\n', n);
@@ -120,9 +120,9 @@ ptrdiff_t reply_length(const char* p, size_t n) {
 }
 
 struct Result {
-  std::vector<uint32_t> batch_us;  // round-trip time of each batch
+  std::vector<uint32_t> batch_us;  // per round trip
   uint64_t commands = 0;
-  uint64_t errors = 0;     // error replies and protocol failures
+  uint64_t errors = 0;     // error replies and dead connections
   uint64_t get_hits = 0;
   uint64_t gets = 0;
   bool connect_failed = false;
@@ -152,7 +152,7 @@ std::string make_key(uint64_t n) {
   return buf;
 }
 
-// Reads `count` replies. Returns false on a closed connection or garbage.
+// reads count replies, false if the connection died or sent garbage
 bool read_replies(int fd, std::vector<char>& buf, size_t& pos, size_t& end, int count,
                   Result& r, const std::vector<char>& is_get) {
   for (int i = 0; i < count; ++i) {

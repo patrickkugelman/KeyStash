@@ -5,7 +5,7 @@
 
 namespace persist {
 
-// Fixed little-endian integers, independent of host byte order.
+// little-endian whatever the host is
 inline void store_u32(char* p, uint32_t v) {
   for (int i = 0; i < 4; ++i) p[i] = static_cast<char>((v >> (8 * i)) & 0xFFu);
 }

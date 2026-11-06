@@ -18,7 +18,7 @@ namespace net {
 namespace {
 
 constexpr int kBacklog = 511;
-// Bounds accept work per wakeup so a connection storm cannot starve clients.
+// cap on accepts per wakeup
 constexpr int kMaxAcceptsPerEvent = 256;
 
 std::runtime_error sys_error(const std::string& what) {
@@ -83,14 +83,14 @@ void Server::on_event(uint32_t) {
     Connection* raw = connection.get();
     if (!loop_.add(fd, EPOLLIN, raw)) {
       std::perror("epoll add client");
-      continue;  // destroying the connection closes fd
+      continue;  // the destructor closes fd
     }
     connections_.emplace(raw, std::move(connection));
   }
 }
 
-// Level triggering would spin on a pending connection we cannot accept, so
-// free a descriptor, take that client and hang up on it.
+// out of fds: level triggering would spin on the pending connection, so
+// free the spare fd, accept it and hang up
 void Server::shed_one_client() {
   ::close(spare_fd_);
   const int fd = accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
@@ -104,8 +104,7 @@ void Server::defer(Connection* connection) {
   pending_.push_back(connection);
 }
 
-// Group commit: run every queued connection's commands, make them durable
-// with one executor commit(), and only then send the replies.
+// group commit: run the queued commands, one commit, then send the replies
 void Server::end_of_batch() {
   if (pending_.empty()) return;
   std::vector<Connection*> batch;

@@ -91,10 +91,10 @@ void WalWriter::open(const std::string& dir, uint64_t seq, FsyncPolicy policy,
       throw std::runtime_error("write header " + path + ": " + why);
     }
     if (defer_creation_sync) {
-      unsynced = true;  // the periodic sync will cover the header
+      unsynced = true;  // the periodic sync gets the header
       creation_pending = true;
     } else {
-      fsync_dir_or_die(dir);  // make the new file's directory entry durable
+      fsync_dir_or_die(dir);  // so the new file survives a crash
     }
     size = header.size();
   }
@@ -113,8 +113,8 @@ bool WalWriter::rotate(uint64_t new_seq, int* old_fd, bool* old_unsynced, std::s
   commit();
   WalWriter next;
   try {
-    // Under `always` the new file must be durable before any ack, so it is
-    // synced inline; otherwise the caller hands the directory fsync to a worker.
+    // always: the file has to be durable before any ack, so sync inline.
+    // otherwise the caller queues the dir fsync on a worker
     next.open(dir_, new_seq, policy_, policy_ != FsyncPolicy::kAlways);
   } catch (const std::exception& e) {
     *error = e.what();
@@ -128,7 +128,7 @@ bool WalWriter::rotate(uint64_t new_seq, int* old_fd, bool* old_unsynced, std::s
   unsynced_ = next.unsynced_;
   creation_pending_ = next.creation_pending_;
   last_sync_ = next.last_sync_;
-  next.fd_ = -1;  // ownership moved; its destructor must not close it
+  next.fd_ = -1;  // moved out, keep the destructor from closing it
   return true;
 }
 
@@ -143,7 +143,7 @@ void WalWriter::close() {
 void WalWriter::append(OpType type, std::string_view key, std::string_view value,
                        int64_t when_ms) {
   const size_t start = buf_.size();
-  buf_.append(8, '\0');  // length and checksum, filled in below
+  buf_.append(8, '\0');  // len + crc, filled in at the end
   buf_.push_back(static_cast<char>(type));
   put_u32(buf_, static_cast<uint32_t>(key.size()));
   buf_.append(key);

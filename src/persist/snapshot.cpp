@@ -69,7 +69,7 @@ bool write_snapshot(const SnapshotBlob& blob, const std::string& dir, uint64_t* 
   std::string footer;
   put_u32(footer, kSnapshotFooterMarker);
   put_u64(footer, blob.count);
-  crc = crc32(footer.data(), footer.size(), crc);  // the CRC covers the marker and count
+  crc = crc32(footer.data(), footer.size(), crc);  // marker and count are covered too
   put_u32(footer, crc);
   if (!write_all(fd, footer.data(), footer.size())) return fail("write snapshot");
 

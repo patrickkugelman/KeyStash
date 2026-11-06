@@ -8,7 +8,7 @@
 
 namespace net {
 
-// Contiguous byte FIFO. Pointers from data() die on the next append.
+// byte fifo, append() invalidates data()
 class Buffer {
  public:
   const char* data() const { return storage_.get() + read_; }
@@ -27,7 +27,7 @@ class Buffer {
     read_ += std::min(n, size());
     if (read_ == write_) {
       read_ = write_ = 0;
-      // Do not pin a huge allocation after one large request.
+      // don't hold on to a huge buffer after one big request
       if (capacity_ > kRetainMax) {
         storage_.reset();
         capacity_ = 0;
@@ -44,7 +44,7 @@ class Buffer {
   void ensure_tail(size_t n) {
     if (capacity_ - write_ >= n) return;
     const size_t live = size();
-    // Compact only when it frees at least half, keeping appends amortized O(1).
+    // only compact when it frees at least half
     if (live + n <= capacity_ && read_ >= capacity_ / 2) {
       std::memmove(storage_.get(), storage_.get() + read_, live);
     } else {

@@ -13,8 +13,7 @@ namespace engine {
 
 class Dispatcher : public net::CommandExecutor {
  public:
-  // `persistence` may be null (memory only). It must outlive the dispatcher
-  // and already be recovered into store().
+  // persistence can be null (memory only), recover it into store() first
   explicit Dispatcher(std::unique_ptr<Table> table, persist::Persistence* persistence = nullptr)
       : store_(std::move(table)), persist_(persistence) {}
 
@@ -23,8 +22,7 @@ class Dispatcher : public net::CommandExecutor {
   void execute(const std::vector<std::string_view>& args, net::Buffer& out) override;
   void commit() override;
 
-  // Periodic maintenance (active expiry, rehash, log sync, snapshots).
-  // True if more work is pending.
+  // expiry sweep, rehash, log sync, snapshots. true = more to do
   bool cron();
 
  private:
@@ -50,7 +48,7 @@ class Dispatcher : public net::CommandExecutor {
 
   struct Command {
     std::string_view name;
-    int arity;  // includes the name; negative means "at least -arity"
+    int arity;  // counts the name, negative = at least -arity
     void (Dispatcher::*handler)(const Args&, net::Buffer&);
   };
   static const Command kCommands[];

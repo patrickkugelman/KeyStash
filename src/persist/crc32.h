@@ -19,7 +19,7 @@ constexpr std::array<uint32_t, 256> make_crc_table() {
 inline constexpr std::array<uint32_t, 256> kCrcTable = make_crc_table();
 }  // namespace detail
 
-// IEEE CRC-32. Pass the previous result as `crc` to checksum in pieces.
+// plain crc32, pass the old result as crc to continue
 inline uint32_t crc32(const void* data, size_t n, uint32_t crc = 0) {
   const auto* p = static_cast<const unsigned char*>(data);
   uint32_t c = ~crc;

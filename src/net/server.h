@@ -13,10 +13,9 @@
 
 namespace net {
 
-// Owns the listening socket and all connections.
+// listening socket and all connections
 class Server : public EventHandler {
  public:
-  // Throws std::runtime_error if it cannot bind.
   Server(EventLoop& loop, CommandExecutor& executor, const std::string& bind_addr, uint16_t port);
   ~Server() override;
   Server(const Server&) = delete;
@@ -24,13 +23,12 @@ class Server : public EventHandler {
 
   void on_event(uint32_t events) override;
 
-  // Called by a connection that has left the event loop.
   void release(Connection* connection);
 
-  // Queues a connection for this batch's execute / commit / flush pass.
+  // run this connection in the end-of-batch pass
   void defer(Connection* connection);
 
-  // Shared by all connections; valid only during one on_event call.
+  // read buffer shared by all connections
   std::pair<char*, size_t> read_scratch() { return {read_scratch_.get(), kReadChunk}; }
 
  private:
@@ -42,10 +40,10 @@ class Server : public EventHandler {
   EventLoop& loop_;
   CommandExecutor& executor_;
   int listen_fd_ = -1;
-  int spare_fd_ = -1;  // lets us reject clients when out of descriptors
+  int spare_fd_ = -1;  // for rejecting clients at the fd limit
   std::unique_ptr<char[]> read_scratch_;
   std::unordered_map<Connection*, std::unique_ptr<Connection>> connections_;
-  std::vector<Connection*> pending_;  // connections with work in this batch
+  std::vector<Connection*> pending_;  // work queued in this batch
 };
 
 }  // namespace net

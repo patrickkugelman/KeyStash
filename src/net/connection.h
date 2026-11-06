@@ -11,13 +11,12 @@
 
 namespace net {
 
-// Runs one parsed command and appends its reply to `out`.
+// runs one parsed command, the reply goes to out
 class CommandExecutor {
  public:
   virtual ~CommandExecutor() = default;
   virtual void execute(const std::vector<std::string_view>& args, Buffer& out) = 0;
-  // Called once per event-loop batch after all its commands ran and before
-  // any reply is sent: the place to make their effects durable.
+  // once per loop batch, after the commands ran and before any reply is sent
   virtual void commit() {}
 };
 
@@ -31,12 +30,10 @@ class Connection : public EventHandler {
   Connection& operator=(const Connection&) = delete;
 
   int fd() const { return fd_; }
-  // Only reads; execution and replies happen in process()/finish().
   void on_event(uint32_t events) override;
 
-  // The server runs these for every connection that had an event: process()
-  // for all, then one executor commit(), then finish() for all, so replies
-  // never leave before the commands behind them are durable.
+  // server calls process() on every queued connection, then commit() once,
+  // then finish() on all of them
   void process();
   void finish();
 
@@ -44,8 +41,7 @@ class Connection : public EventHandler {
   void set_queued(bool queued) { queued_ = queued; }
 
  private:
-  // Replies above this pause command execution, bounding output memory to the
-  // high mark plus one reply. Queued input is capped at proto::kMaxRequest.
+  // above the high mark we stop running commands until the client reads
   static constexpr size_t kOutHighWater = 1024 * 1024;
   static constexpr size_t kOutLowWater = 256 * 1024;
 
@@ -63,11 +59,11 @@ class Connection : public EventHandler {
   Buffer out_;
   proto::Parser parser_;
   uint32_t interest_;
-  bool peer_done_ = false;           // peer sent FIN; replies may still go out
-  bool close_after_flush_ = false;   // protocol error reply is queued
-  bool paused_ = false;              // reply backlog above the high mark
+  bool peer_done_ = false;           // got FIN, replies can still go out
+  bool close_after_flush_ = false;   // protocol error queued, close after it
+  bool paused_ = false;              // too much unsent reply
   bool closed_ = false;
-  bool queued_ = false;              // already in the server's batch list
+  bool queued_ = false;              // already in the server's list
 };
 
 }  // namespace net

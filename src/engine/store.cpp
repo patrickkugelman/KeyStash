@@ -99,16 +99,16 @@ Store::ExpireResult Store::expire_at(std::string_view key, int64_t when_ms) {
 }
 
 void Store::set_deadline(std::string_view key, Entry& entry, int64_t when_ms) {
-  if (entry.expire_at_ms == when_ms) return;  // heap already holds it
+  if (entry.expire_at_ms == when_ms) return;  // already in the heap
   if (entry.expire_at_ms < 0) ++ttl_count_;
   entry.expire_at_ms = when_ms;
   heap_.push_back({when_ms, std::string(key)});
   std::push_heap(heap_.begin(), heap_.end(), later<HeapItem>);
-  // Repeated EXPIRE on live keys leaves stale items; cap them.
+  // EXPIRE on the same key over and over leaves stale items, cap them
   if (heap_.size() > 2 * ttl_count_ + 1024) rebuild_heap();
 }
 
-// Drops stale and duplicate items, leaving exactly one per key with a TTL.
+// drop stale and duplicate items, one per key with a ttl is left
 void Store::rebuild_heap() {
   std::vector<HeapItem> live;
   live.reserve(ttl_count_);

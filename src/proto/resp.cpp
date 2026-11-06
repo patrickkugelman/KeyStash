@@ -45,13 +45,13 @@ Parser::Status Parser::fail(std::string message) {
   return Status::kError;
 }
 
-// `len` starts at the current request, so this caps one request's total size.
+// len is the size of the request so far
 Parser::Status Parser::need_more(size_t len) {
   if (len > kMaxRequest) return fail("too big request");
   return Status::kNeedMore;
 }
 
-// Finds the CRLF ending the line at pos_ and advances pos_ past it.
+// finds the CRLF that ends the line at pos_ and moves pos_ past it
 Parser::Line Parser::next_line(const char* data, size_t len, std::string_view* line) {
   const size_t from = std::max(pos_, scan_);
   const void* hit = from < len ? std::memchr(data + from, '\r', len - from) : nullptr;
@@ -62,7 +62,7 @@ Parser::Line Parser::next_line(const char* data, size_t len, std::string_view* l
   const size_t cr = static_cast<size_t>(static_cast<const char*>(hit) - data);
   if (cr - pos_ > kMaxLine) return Line::kTooLong;
   if (cr + 1 == len) {
-    scan_ = cr;  // recheck this CR once its successor arrives
+    scan_ = cr;  // look at this CR again when the next byte arrives
     return Line::kNeedMore;
   }
   if (data[cr + 1] != '\n') return Line::kBadTerminator;
@@ -72,9 +72,9 @@ Parser::Line Parser::next_line(const char* data, size_t len, std::string_view* l
   return Line::kReady;
 }
 
-// Redis-style splitting: whitespace, "double" with escapes, 'single' quotes.
+// same splitting as redis inline: spaces, "double" with escapes, 'single'
 bool Parser::split_inline(std::string_view line) {
-  // Unescaped text never outgrows the line, so views stay stable.
+  // unescaping only shrinks the text, so the views stay valid
   inline_storage_.clear();
   inline_storage_.reserve(line.size());
   size_t i = 0;
@@ -188,7 +188,7 @@ Parser::Status Parser::parse(const char* data, size_t len) {
         }
         if (count <= 0) return Status::kComplete;
         remaining_ = static_cast<size_t>(count);
-        // The count is client-controlled, so do not reserve from it.
+        // the client picks this number, don't reserve for it
         spans_.reserve(std::min<size_t>(remaining_, 64));
         state_ = State::kBulkHeader;
         break;
@@ -237,7 +237,7 @@ void Parser::reset() {
   scan_ = 0;
   remaining_ = 0;
   bulk_len_ = 0;
-  // Drop outliers so one huge request does not pin memory per connection.
+  // free big buffers instead of keeping them per connection
   constexpr size_t kRetainArgs = 1024;
   if (spans_.capacity() > kRetainArgs) {
     std::vector<Span>().swap(spans_);
@@ -270,7 +270,7 @@ void write_prefixed(net::Buffer& out, char prefix, int64_t v) {
   char buf[24];
   buf[0] = prefix;
   auto [ptr, ec] = std::to_chars(buf + 1, buf + sizeof(buf) - 2, v);
-  (void)ec;  // 21 bytes always fit an int64_t
+  (void)ec;  // 21 bytes is enough for an int64
   ptr[0] = '\r';
   ptr[1] = '\n';
   out.append(buf, static_cast<size_t>(ptr + 2 - buf));

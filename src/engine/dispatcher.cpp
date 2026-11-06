@@ -65,7 +65,7 @@ void Dispatcher::bgsave(const Args&, net::Buffer& out) {
   }
 }
 
-// key:value lines in the style of Redis INFO; mostly for tests and benchmarks.
+// key:value lines like redis INFO, mostly used by the tests
 void Dispatcher::info(const Args&, net::Buffer& out) {
   std::string text = "keys:" + std::to_string(store_.size()) + "\r\n";
   if (persist_ == nullptr) {
@@ -140,7 +140,7 @@ void Dispatcher::ping(const Args& args, net::Buffer& out) {
   }
 }
 
-// redis-cli --pipe ends its stream with ECHO <marker> and waits for the reply.
+// redis-cli --pipe ends with ECHO <marker> and waits for it
 void Dispatcher::echo(const Args& args, net::Buffer& out) { proto::write_bulk(out, args[1]); }
 
 void Dispatcher::set(const Args& args, net::Buffer& out) {
@@ -195,7 +195,7 @@ void Dispatcher::expire_generic(const Args& args, net::Buffer& out, int64_t unit
     proto::write_error(out, "ERR invalid expire time in '" + lowercase(args[0]) + "' command");
     return;
   }
-  // Logged as an absolute time so replay does not depend on when it runs.
+  // absolute time, so replay doesn't depend on when it runs
   const Store::ExpireResult result = store_.expire_at(args[1], when);
   if (persist_ != nullptr) {
     if (result == Store::ExpireResult::kSet) persist_->log_expire_at(args[1], when);
@@ -217,7 +217,7 @@ void Dispatcher::incr(const Args& args, net::Buffer& out) {
   int64_t result = 0;
   switch (store_.incr_by(args[1], 1, &result)) {
     case Store::IncrStatus::kOk:
-      // Logged as the resulting value so replay never depends on prior state.
+      // log the result, not the increment
       if (persist_ != nullptr) persist_->log_set_keep_ttl(args[1], std::to_string(result));
       proto::write_integer(out, result);
       break;

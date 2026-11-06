@@ -12,8 +12,8 @@
 
 namespace engine {
 
-// Keyspace with TTLs. Expired keys are removed lazily on access and by an
-// active sweep driven from cron(). Expiry times are absolute unix ms.
+// keyspace with ttls. expired keys go lazily on access and from the sweep
+// in cron(). times are absolute unix ms
 class Store {
  public:
   explicit Store(std::unique_ptr<Table> table);
@@ -21,30 +21,30 @@ class Store {
   int64_t now_ms() const;
   size_t size() const { return table_->size(); }
 
-  // Overwrites the value and clears any TTL.
+  // overwrite the value, clear the ttl
   void set(std::string_view key, std::string_view value);
-  // Overwrites the value and keeps any TTL (what INCR does).
+  // overwrite the value, keep the ttl (INCR)
   void set_keep_ttl(std::string_view key, std::string_view value);
-  // Restores an entry from a snapshot; entries already expired are skipped.
+  // from a snapshot, already expired entries are skipped
   void load_entry(std::string_view key, std::string_view value, int64_t expire_at_ms);
-  // Visits live (unexpired) entries. `fn` must not mutate the store.
+  // live entries only, fn must not modify the store
   void for_each_live(const std::function<void(std::string_view, const Entry&)>& fn);
-  // Null if absent or expired. Valid until the next mutation.
+  // null if missing or expired, valid until the next change
   const std::string* get(std::string_view key);
   bool del(std::string_view key);
   bool exists(std::string_view key);
 
   enum class ExpireResult { kNoKey, kSet, kDeleted };
-  // Deadline at or before now deletes the key.
+  // a time in the past deletes the key
   ExpireResult expire_at(std::string_view key, int64_t when_ms);
-  // -2 no key, -1 no TTL, else remaining ms.
+  // -2 no key, -1 no ttl, else ms left
   int64_t ttl_ms(std::string_view key);
 
   enum class IncrStatus { kOk, kNotInteger, kOverflow };
-  // Missing keys count as 0. An existing TTL is kept.
+  // missing counts as 0, the ttl is kept
   IncrStatus incr_by(std::string_view key, int64_t delta, int64_t* result);
 
-  // Bounded background work. True means more is pending: call again soon.
+  // bounded work per call, true = call again soon
   bool cron();
 
  private:
@@ -63,10 +63,10 @@ class Store {
   void rebuild_heap();
 
   std::unique_ptr<Table> table_;
-  // Min-heap on `when`. Entries go stale when a TTL changes or the key
-  // dies; a stale entry is detected on pop by comparing with the live TTL.
+  // min-heap on when. items go stale when a ttl changes or the key dies,
+  // checked on pop against the live ttl
   std::vector<HeapItem> heap_;
-  size_t ttl_count_ = 0;  // keys that currently have a TTL
+  size_t ttl_count_ = 0;  // keys that have a ttl
 };
 
 }  // namespace engine

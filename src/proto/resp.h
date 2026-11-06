@@ -10,30 +10,30 @@
 
 namespace proto {
 
-// Same limits as Redis defaults.
+// redis defaults
 inline constexpr size_t kMaxArgs = 1024 * 1024;
 inline constexpr size_t kMaxBulk = 512 * 1024 * 1024;
 inline constexpr size_t kMaxLine = 64 * 1024;
 inline constexpr size_t kMaxRequest = 1024 * 1024 * 1024;
 
-// Incremental request parser (multibulk and inline). It never copies bulk
-// payloads: a request stays in the caller's buffer until fully received.
+// incremental request parser (multibulk and inline), args are views into
+// the caller's buffer
 class Parser {
  public:
   enum class Status { kNeedMore, kComplete, kError };
 
-  // `data` is all unconsumed input. Between calls for one request its bytes
-  // may move but must only be extended. Resumes where the last call stopped.
+  // data = all unconsumed input, it can move between calls but only grows.
+  // picks up where the last call stopped
   Status parse(const char* data, size_t len);
 
-  // Valid after kComplete until the input buffer changes. Empty for blank requests.
+  // valid until the input buffer changes, empty for a blank line
   const std::vector<std::string_view>& args() const { return args_; }
-  // Bytes to drop from the input after kComplete.
+  // bytes to drop from the input after kComplete
   size_t consumed() const { return pos_; }
-  // Valid after kError. Safe to echo to the client (no CR/LF).
+  // after kError, no CR/LF so it can go straight to the client
   const std::string& error() const { return error_; }
 
-  // Call after consuming a complete request.
+  // call once the request is consumed
   void reset();
 
  private:
@@ -52,8 +52,8 @@ class Parser {
   bool split_inline(std::string_view line);
 
   State state_ = State::kStart;
-  size_t pos_ = 0;   // start of the next unparsed element
-  size_t scan_ = 0;  // terminator search resumes here
+  size_t pos_ = 0;   // next unparsed element
+  size_t scan_ = 0;  // where the CRLF search resumes
   size_t remaining_ = 0;
   size_t bulk_len_ = 0;
   std::vector<Span> spans_;
@@ -62,9 +62,9 @@ class Parser {
   std::string error_;
 };
 
-// Reply serializers.
+// reply writers
 void write_simple(net::Buffer& out, std::string_view s);
-// `s` includes the code, e.g. "ERR bad". CR and LF are replaced with spaces.
+// s starts with the code ("ERR ..."), CR and LF become spaces
 void write_error(net::Buffer& out, std::string_view s);
 void write_integer(net::Buffer& out, int64_t v);
 void write_bulk(net::Buffer& out, std::string_view s);

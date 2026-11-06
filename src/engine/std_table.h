@@ -7,7 +7,7 @@
 
 namespace engine {
 
-// Reference implementation on std::unordered_map.
+// plain std::unordered_map version
 class StdTable : public Table {
  public:
   Entry* find(std::string_view key) override;
@@ -17,7 +17,7 @@ class StdTable : public Table {
   void for_each(const std::function<void(std::string_view, const Entry&)>& fn) const override;
 
  private:
-  // C++17 maps have no heterogeneous lookup; reuse one string for probes.
+  // no heterogeneous lookup in c++17, so reuse one string for the probe
   const std::string& probe(std::string_view key);
 
   std::unordered_map<std::string, Entry> map_;
