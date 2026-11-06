@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -29,12 +30,19 @@ class EventLoop {
   // that batch can never reach a freed handler or a reused fd.
   void retire(std::unique_ptr<EventHandler> handler);
 
+  // Calls `fn` every `interval_ms` from the loop thread. If it returns true
+  // it is called again as soon as pending events have been handled.
+  void set_periodic(int interval_ms, std::function<bool()> fn);
+
   void run();
   void stop() { running_ = false; }
 
  private:
   int epoll_fd_;
   bool running_ = false;
+  std::function<bool()> periodic_;
+  int64_t interval_ms_ = 0;
+  int64_t next_tick_ms_ = 0;
   std::vector<std::unique_ptr<EventHandler>> retired_;
 };
 

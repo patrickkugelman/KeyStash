@@ -3,14 +3,22 @@
 #include <sys/epoll.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
+#include <ctime>
 #include <cstdlib>
 #include <stdexcept>
 #include <utility>
 
 namespace net {
 namespace {
+
+int64_t monotonic_ms() {
+  timespec ts{};
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return static_cast<int64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
+}
 
 [[noreturn]] void die(const char* what) {
   std::perror(what);
@@ -47,11 +55,21 @@ void EventLoop::retire(std::unique_ptr<EventHandler> handler) {
   retired_.push_back(std::move(handler));
 }
 
+void EventLoop::set_periodic(int interval_ms, std::function<bool()> fn) {
+  periodic_ = std::move(fn);
+  interval_ms_ = interval_ms;
+  next_tick_ms_ = monotonic_ms() + interval_ms;
+}
+
 void EventLoop::run() {
   epoll_event events[256];
   running_ = true;
   while (running_) {
-    const int n = epoll_wait(epoll_fd_, events, 256, -1);
+    int timeout = -1;
+    if (periodic_) {
+      timeout = static_cast<int>(std::max<int64_t>(0, next_tick_ms_ - monotonic_ms()));
+    }
+    const int n = epoll_wait(epoll_fd_, events, 256, timeout);
     if (n < 0) {
       if (errno == EINTR) continue;
       die("epoll_wait");
@@ -60,6 +78,12 @@ void EventLoop::run() {
       static_cast<EventHandler*>(events[i].data.ptr)->on_event(events[i].events);
     }
     retired_.clear();
+    if (periodic_ && running_) {
+      const int64_t now = monotonic_ms();
+      if (now >= next_tick_ms_) {
+        next_tick_ms_ = periodic_() ? now : now + interval_ms_;
+      }
+    }
   }
 }
 

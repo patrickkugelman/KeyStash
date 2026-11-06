@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 
+#include "engine/numeric.h"
 #include "proto/resp.h"
 
 namespace engine {
@@ -17,6 +18,12 @@ bool equals_ignore_case(std::string_view a, std::string_view lowercase) {
   return a.size() == lowercase.size() &&
          std::equal(a.begin(), a.end(), lowercase.begin(),
                     [](char x, char y) { return lower(x) == y; });
+}
+
+std::string lowercase(std::string_view s) {
+  std::string r(s);
+  for (char& c : r) c = lower(c);
+  return r;
 }
 
 void write_unknown_command(const std::vector<std::string_view>& args, net::Buffer& out) {
@@ -35,9 +42,12 @@ void write_unknown_command(const std::vector<std::string_view>& args, net::Buffe
 }  // namespace
 
 const Dispatcher::Command Dispatcher::kCommands[] = {
-    {"ping", -1, &Dispatcher::ping},   {"set", -3, &Dispatcher::set},
-    {"get", 2, &Dispatcher::get},      {"del", -2, &Dispatcher::del},
-    {"exists", -2, &Dispatcher::exists}, {"echo", 2, &Dispatcher::echo},
+    {"ping", -1, &Dispatcher::ping},     {"echo", 2, &Dispatcher::echo},
+    {"set", -3, &Dispatcher::set},       {"get", 2, &Dispatcher::get},
+    {"del", -2, &Dispatcher::del},       {"exists", -2, &Dispatcher::exists},
+    {"expire", 3, &Dispatcher::expire},  {"pexpire", 3, &Dispatcher::pexpire},
+    {"ttl", 2, &Dispatcher::ttl},        {"pttl", 2, &Dispatcher::pttl},
+    {"incr", 2, &Dispatcher::incr},      {"dbsize", 1, &Dispatcher::dbsize},
 };
 
 void Dispatcher::execute(const Args& args, net::Buffer& out) {
@@ -96,6 +106,54 @@ void Dispatcher::exists(const Args& args, net::Buffer& out) {
   int64_t found = 0;
   for (size_t i = 1; i < args.size(); ++i) found += store_.exists(args[i]) ? 1 : 0;
   proto::write_integer(out, found);
+}
+
+void Dispatcher::expire(const Args& args, net::Buffer& out) { expire_generic(args, out, 1000); }
+
+void Dispatcher::pexpire(const Args& args, net::Buffer& out) { expire_generic(args, out, 1); }
+
+void Dispatcher::expire_generic(const Args& args, net::Buffer& out, int64_t unit_ms) {
+  int64_t amount = 0;
+  if (!parse_int64(args[2], &amount)) {
+    proto::write_error(out, "ERR value is not an integer or out of range");
+    return;
+  }
+  int64_t delta = 0;
+  int64_t when = 0;
+  if (__builtin_mul_overflow(amount, unit_ms, &delta) ||
+      __builtin_add_overflow(delta, store_.now_ms(), &when)) {
+    proto::write_error(out, "ERR invalid expire time in '" + lowercase(args[0]) + "' command");
+    return;
+  }
+  proto::write_integer(out, store_.expire_at(args[1], when) == Store::ExpireResult::kNoKey ? 0 : 1);
+}
+
+void Dispatcher::ttl(const Args& args, net::Buffer& out) {
+  const int64_t ms = store_.ttl_ms(args[1]);
+  proto::write_integer(out, ms < 0 ? ms : (ms + 500) / 1000);
+}
+
+void Dispatcher::pttl(const Args& args, net::Buffer& out) {
+  proto::write_integer(out, store_.ttl_ms(args[1]));
+}
+
+void Dispatcher::incr(const Args& args, net::Buffer& out) {
+  int64_t result = 0;
+  switch (store_.incr_by(args[1], 1, &result)) {
+    case Store::IncrStatus::kOk:
+      proto::write_integer(out, result);
+      break;
+    case Store::IncrStatus::kNotInteger:
+      proto::write_error(out, "ERR value is not an integer or out of range");
+      break;
+    case Store::IncrStatus::kOverflow:
+      proto::write_error(out, "ERR increment or decrement would overflow");
+      break;
+  }
+}
+
+void Dispatcher::dbsize(const Args&, net::Buffer& out) {
+  proto::write_integer(out, static_cast<int64_t>(store_.size()));
 }
 
 }  // namespace engine

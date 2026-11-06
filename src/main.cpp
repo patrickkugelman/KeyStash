@@ -7,11 +7,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 
 #include "engine/dispatcher.h"
+#include "engine/hash_table.h"
+#include "engine/std_table.h"
 #include "net/event_loop.h"
 #include "net/server.h"
 
@@ -42,6 +45,7 @@ class SignalWatcher : public net::EventHandler {
 struct Options {
   std::string bind = "127.0.0.1";
   uint16_t port = 6379;
+  std::string table = "custom";  // custom | std
 };
 
 bool parse_args(int argc, char** argv, Options* options) {
@@ -55,6 +59,9 @@ bool parse_args(int argc, char** argv, Options* options) {
       if (ec != std::errc() || ptr != end) return false;
     } else if (flag == "--bind") {
       options->bind = std::string(value);
+    } else if (flag == "--table") {
+      if (value != "custom" && value != "std") return false;
+      options->table = std::string(value);
     } else {
       return false;
     }
@@ -67,14 +74,21 @@ bool parse_args(int argc, char** argv, Options* options) {
 int main(int argc, char** argv) {
   Options options;
   if (!parse_args(argc, argv, &options)) {
-    std::fprintf(stderr, "usage: %s [--bind ADDR] [--port N]\n", argv[0]);
+    std::fprintf(stderr, "usage: %s [--bind ADDR] [--port N] [--table custom|std]\n", argv[0]);
     return 2;
   }
   try {
     signal(SIGPIPE, SIG_IGN);
     net::EventLoop loop;
     SignalWatcher signals(loop);
-    engine::Dispatcher dispatcher;
+    std::unique_ptr<engine::Table> table;
+    if (options.table == "std") {
+      table = std::make_unique<engine::StdTable>();
+    } else {
+      table = std::make_unique<engine::HashTable>();
+    }
+    engine::Dispatcher dispatcher(std::move(table));
+    loop.set_periodic(100, [&dispatcher] { return dispatcher.cron(); });
     net::Server server(loop, dispatcher, options.bind, options.port);
     std::fprintf(stderr, "listening on %s:%u\n", options.bind.c_str(),
                  static_cast<unsigned>(options.port));

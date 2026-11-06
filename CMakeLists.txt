@@ -53,6 +53,8 @@ add_executable(kvserver
   src/net/connection.cpp
   src/net/server.cpp
   src/proto/resp.cpp
+  src/engine/std_table.cpp
+  src/engine/hash_table.cpp
   src/engine/store.cpp
   src/engine/dispatcher.cpp
 )
