@@ -6,6 +6,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "net/connection.h"
 #include "net/event_loop.h"
@@ -26,6 +27,9 @@ class Server : public EventHandler {
   // Called by a connection that has left the event loop.
   void release(Connection* connection);
 
+  // Queues a connection for this batch's execute / commit / flush pass.
+  void defer(Connection* connection);
+
   // Shared by all connections; valid only during one on_event call.
   std::pair<char*, size_t> read_scratch() { return {read_scratch_.get(), kReadChunk}; }
 
@@ -33,6 +37,7 @@ class Server : public EventHandler {
   static constexpr size_t kReadChunk = 64 * 1024;
 
   void shed_one_client();
+  void end_of_batch();
 
   EventLoop& loop_;
   CommandExecutor& executor_;
@@ -40,6 +45,7 @@ class Server : public EventHandler {
   int spare_fd_ = -1;  // lets us reject clients when out of descriptors
   std::unique_ptr<char[]> read_scratch_;
   std::unordered_map<Connection*, std::unique_ptr<Connection>> connections_;
+  std::vector<Connection*> pending_;  // connections with work in this batch
 };
 
 }  // namespace net

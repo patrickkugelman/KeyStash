@@ -77,6 +77,7 @@ void EventLoop::run() {
     for (int i = 0; i < n; ++i) {
       static_cast<EventHandler*>(events[i].data.ptr)->on_event(events[i].events);
     }
+    if (n > 0 && after_events_) after_events_();
     retired_.clear();
     if (periodic_ && running_) {
       const int64_t now = monotonic_ms();

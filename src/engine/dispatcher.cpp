@@ -48,7 +48,31 @@ const Dispatcher::Command Dispatcher::kCommands[] = {
     {"expire", 3, &Dispatcher::expire},  {"pexpire", 3, &Dispatcher::pexpire},
     {"ttl", 2, &Dispatcher::ttl},        {"pttl", 2, &Dispatcher::pttl},
     {"incr", 2, &Dispatcher::incr},      {"dbsize", 1, &Dispatcher::dbsize},
+    {"save", 1, &Dispatcher::save},
 };
+
+void Dispatcher::commit() {
+  if (persist_ != nullptr) persist_->commit();
+}
+
+bool Dispatcher::cron() {
+  const bool more = store_.cron();
+  if (persist_ != nullptr) persist_->cron(store_);
+  return more;
+}
+
+void Dispatcher::save(const Args&, net::Buffer& out) {
+  if (persist_ == nullptr) {
+    proto::write_error(out, "ERR persistence is not enabled");
+    return;
+  }
+  std::string error;
+  if (persist_->snapshot(store_, &error)) {
+    proto::write_simple(out, "OK");
+  } else {
+    proto::write_error(out, "ERR snapshot failed: " + error);
+  }
+}
 
 void Dispatcher::execute(const Args& args, net::Buffer& out) {
   for (const Command& command : kCommands) {
@@ -84,6 +108,7 @@ void Dispatcher::set(const Args& args, net::Buffer& out) {
     return;
   }
   store_.set(args[1], args[2]);
+  if (persist_ != nullptr) persist_->log_set(args[1], args[2]);
   proto::write_simple(out, "OK");
 }
 
@@ -98,7 +123,11 @@ void Dispatcher::get(const Args& args, net::Buffer& out) {
 
 void Dispatcher::del(const Args& args, net::Buffer& out) {
   int64_t removed = 0;
-  for (size_t i = 1; i < args.size(); ++i) removed += store_.del(args[i]) ? 1 : 0;
+  for (size_t i = 1; i < args.size(); ++i) {
+    if (!store_.del(args[i])) continue;
+    ++removed;
+    if (persist_ != nullptr) persist_->log_del(args[i]);
+  }
   proto::write_integer(out, removed);
 }
 
@@ -125,7 +154,13 @@ void Dispatcher::expire_generic(const Args& args, net::Buffer& out, int64_t unit
     proto::write_error(out, "ERR invalid expire time in '" + lowercase(args[0]) + "' command");
     return;
   }
-  proto::write_integer(out, store_.expire_at(args[1], when) == Store::ExpireResult::kNoKey ? 0 : 1);
+  // Logged as an absolute time so replay does not depend on when it runs.
+  const Store::ExpireResult result = store_.expire_at(args[1], when);
+  if (persist_ != nullptr) {
+    if (result == Store::ExpireResult::kSet) persist_->log_expire_at(args[1], when);
+    if (result == Store::ExpireResult::kDeleted) persist_->log_del(args[1]);
+  }
+  proto::write_integer(out, result == Store::ExpireResult::kNoKey ? 0 : 1);
 }
 
 void Dispatcher::ttl(const Args& args, net::Buffer& out) {
@@ -141,6 +176,8 @@ void Dispatcher::incr(const Args& args, net::Buffer& out) {
   int64_t result = 0;
   switch (store_.incr_by(args[1], 1, &result)) {
     case Store::IncrStatus::kOk:
+      // Logged as the resulting value so replay never depends on prior state.
+      if (persist_ != nullptr) persist_->log_set_keep_ttl(args[1], std::to_string(result));
       proto::write_integer(out, result);
       break;
     case Store::IncrStatus::kNotInteger:

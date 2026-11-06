@@ -16,6 +16,9 @@ class CommandExecutor {
  public:
   virtual ~CommandExecutor() = default;
   virtual void execute(const std::vector<std::string_view>& args, Buffer& out) = 0;
+  // Called once per event-loop batch after all its commands ran and before
+  // any reply is sent: the place to make their effects durable.
+  virtual void commit() {}
 };
 
 class Server;
@@ -28,7 +31,17 @@ class Connection : public EventHandler {
   Connection& operator=(const Connection&) = delete;
 
   int fd() const { return fd_; }
+  // Only reads; execution and replies happen in process()/finish().
   void on_event(uint32_t events) override;
+
+  // The server runs these for every connection that had an event: process()
+  // for all, then one executor commit(), then finish() for all, so replies
+  // never leave before the commands behind them are durable.
+  void process();
+  void finish();
+
+  bool queued() const { return queued_; }
+  void set_queued(bool queued) { queued_ = queued; }
 
  private:
   // Replies above this pause command execution, bounding output memory to the
@@ -39,7 +52,6 @@ class Connection : public EventHandler {
   bool read_input();
   void process_input();
   bool flush_output();
-  void advance();
   void update_interest();
   void close_now();
 
@@ -55,6 +67,7 @@ class Connection : public EventHandler {
   bool close_after_flush_ = false;   // protocol error reply is queued
   bool paused_ = false;              // reply backlog above the high mark
   bool closed_ = false;
+  bool queued_ = false;              // already in the server's batch list
 };
 
 }  // namespace net

@@ -34,12 +34,17 @@ class EventLoop {
   // it is called again as soon as pending events have been handled.
   void set_periodic(int interval_ms, std::function<bool()> fn);
 
+  // Called after each batch of ready events has been handled, before the
+  // loop sleeps again. This is where deferred work is flushed.
+  void set_after_events(std::function<void()> fn) { after_events_ = std::move(fn); }
+
   void run();
   void stop() { running_ = false; }
 
  private:
   int epoll_fd_;
   bool running_ = false;
+  std::function<void()> after_events_;
   std::function<bool()> periodic_;
   int64_t interval_ms_ = 0;
   int64_t next_tick_ms_ = 0;

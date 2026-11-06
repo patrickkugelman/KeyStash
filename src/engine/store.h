@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -22,6 +23,12 @@ class Store {
 
   // Overwrites the value and clears any TTL.
   void set(std::string_view key, std::string_view value);
+  // Overwrites the value and keeps any TTL (what INCR does).
+  void set_keep_ttl(std::string_view key, std::string_view value);
+  // Restores an entry from a snapshot; entries already expired are skipped.
+  void load_entry(std::string_view key, std::string_view value, int64_t expire_at_ms);
+  // Visits live (unexpired) entries. `fn` must not mutate the store.
+  void for_each_live(const std::function<void(std::string_view, const Entry&)>& fn);
   // Null if absent or expired. Valid until the next mutation.
   const std::string* get(std::string_view key);
   bool del(std::string_view key);

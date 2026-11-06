@@ -22,6 +22,7 @@ class HashTable : public Table {
   Entry* find_or_insert(std::string_view key, bool* inserted) override;
   bool erase(std::string_view key) override;
   size_t size() const override { return tables_[0].used + tables_[1].used; }
+  void for_each(const std::function<void(std::string_view, const Entry&)>& fn) const override;
   bool rehash_some(size_t buckets) override { return rehash_step(buckets); }
 
  private:

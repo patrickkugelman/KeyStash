@@ -20,4 +20,8 @@ Entry* StdTable::find_or_insert(std::string_view key, bool* inserted) {
 
 bool StdTable::erase(std::string_view key) { return map_.erase(probe(key)) != 0; }
 
+void StdTable::for_each(const std::function<void(std::string_view, const Entry&)>& fn) const {
+  for (const auto& kv : map_) fn(kv.first, kv.second);
+}
+
 }  // namespace engine

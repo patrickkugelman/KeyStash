@@ -14,6 +14,7 @@ class StdTable : public Table {
   Entry* find_or_insert(std::string_view key, bool* inserted) override;
   bool erase(std::string_view key) override;
   size_t size() const override { return map_.size(); }
+  void for_each(const std::function<void(std::string_view, const Entry&)>& fn) const override;
 
  private:
   // C++17 maps have no heterogeneous lookup; reuse one string for probes.

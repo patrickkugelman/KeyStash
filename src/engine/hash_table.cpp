@@ -106,6 +106,15 @@ void HashTable::maybe_shrink() {
   }
 }
 
+// Every node sits in exactly one of the two tables, even mid-rehash.
+void HashTable::for_each(const std::function<void(std::string_view, const Entry&)>& fn) const {
+  for (const Buckets& b : tables_) {
+    for (size_t i = 0; i < b.size; ++i) {
+      for (const Node* n = b.slots[i]; n != nullptr; n = n->next) fn(n->key, n->entry);
+    }
+  }
+}
+
 void HashTable::start_rehash(size_t new_size) {
   allocate(tables_[1], new_size);
   rehash_idx_ = 0;

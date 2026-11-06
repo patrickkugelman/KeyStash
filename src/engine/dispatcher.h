@@ -7,17 +7,25 @@
 #include "engine/store.h"
 #include "engine/table.h"
 #include "net/connection.h"
+#include "persist/persistence.h"
 
 namespace engine {
 
 class Dispatcher : public net::CommandExecutor {
  public:
-  explicit Dispatcher(std::unique_ptr<Table> table) : store_(std::move(table)) {}
+  // `persistence` may be null (memory only). It must outlive the dispatcher
+  // and already be recovered into store().
+  explicit Dispatcher(std::unique_ptr<Table> table, persist::Persistence* persistence = nullptr)
+      : store_(std::move(table)), persist_(persistence) {}
+
+  Store& store() { return store_; }
 
   void execute(const std::vector<std::string_view>& args, net::Buffer& out) override;
+  void commit() override;
 
-  // Periodic maintenance (active expiry, rehash). True if more work is pending.
-  bool cron() { return store_.cron(); }
+  // Periodic maintenance (active expiry, rehash, log sync, snapshots).
+  // True if more work is pending.
+  bool cron();
 
  private:
   using Args = std::vector<std::string_view>;
@@ -34,6 +42,7 @@ class Dispatcher : public net::CommandExecutor {
   void pttl(const Args& args, net::Buffer& out);
   void incr(const Args& args, net::Buffer& out);
   void dbsize(const Args& args, net::Buffer& out);
+  void save(const Args& args, net::Buffer& out);
 
   void expire_generic(const Args& args, net::Buffer& out, int64_t unit_ms);
 
@@ -45,6 +54,7 @@ class Dispatcher : public net::CommandExecutor {
   static const Command kCommands[];
 
   Store store_;
+  persist::Persistence* persist_;
 };
 
 }  // namespace engine

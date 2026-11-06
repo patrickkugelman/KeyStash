@@ -17,6 +17,7 @@
 #include "engine/std_table.h"
 #include "net/event_loop.h"
 #include "net/server.h"
+#include "persist/persistence.h"
 
 namespace {
 
@@ -46,6 +47,9 @@ struct Options {
   std::string bind = "127.0.0.1";
   uint16_t port = 6379;
   std::string table = "custom";  // custom | std
+  std::string dir;               // empty: no persistence
+  persist::FsyncPolicy fsync = persist::FsyncPolicy::kEverySec;
+  uint64_t snapshot_wal_bytes = 64ull << 20;  // 0 disables automatic snapshots
 };
 
 bool parse_args(int argc, char** argv, Options* options) {
@@ -59,6 +63,14 @@ bool parse_args(int argc, char** argv, Options* options) {
       if (ec != std::errc() || ptr != end) return false;
     } else if (flag == "--bind") {
       options->bind = std::string(value);
+    } else if (flag == "--dir") {
+      options->dir = std::string(value);
+    } else if (flag == "--fsync") {
+      if (!persist::parse_fsync_policy(value, &options->fsync)) return false;
+    } else if (flag == "--snapshot-wal-bytes") {
+      const char* end = value.data() + value.size();
+      auto [ptr, ec] = std::from_chars(value.data(), end, options->snapshot_wal_bytes);
+      if (ec != std::errc() || ptr != end) return false;
     } else if (flag == "--table") {
       if (value != "custom" && value != "std") return false;
       options->table = std::string(value);
@@ -74,7 +86,10 @@ bool parse_args(int argc, char** argv, Options* options) {
 int main(int argc, char** argv) {
   Options options;
   if (!parse_args(argc, argv, &options)) {
-    std::fprintf(stderr, "usage: %s [--bind ADDR] [--port N] [--table custom|std]\n", argv[0]);
+    std::fprintf(stderr,
+                 "usage: %s [--bind ADDR] [--port N] [--table custom|std]\n"
+                 "          [--dir PATH] [--fsync always|everysec|no] [--snapshot-wal-bytes N]\n",
+                 argv[0]);
     return 2;
   }
   try {
@@ -87,7 +102,13 @@ int main(int argc, char** argv) {
     } else {
       table = std::make_unique<engine::HashTable>();
     }
-    engine::Dispatcher dispatcher(std::move(table));
+    std::unique_ptr<persist::Persistence> persistence;
+    if (!options.dir.empty()) {
+      persistence = std::make_unique<persist::Persistence>(options.dir, options.fsync,
+                                                           options.snapshot_wal_bytes);
+    }
+    engine::Dispatcher dispatcher(std::move(table), persistence.get());
+    if (persistence) persistence->recover(dispatcher.store());
     loop.set_periodic(100, [&dispatcher] { return dispatcher.cron(); });
     net::Server server(loop, dispatcher, options.bind, options.port);
     std::fprintf(stderr, "listening on %s:%u\n", options.bind.c_str(),

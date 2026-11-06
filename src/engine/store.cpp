@@ -51,6 +51,28 @@ void Store::set(std::string_view key, std::string_view value) {
   clear_ttl(*e);
 }
 
+void Store::set_keep_ttl(std::string_view key, std::string_view value) {
+  bool inserted = false;
+  table_->find_or_insert(key, &inserted)->value.assign(value.data(), value.size());
+}
+
+void Store::load_entry(std::string_view key, std::string_view value, int64_t expire_at_ms) {
+  if (expire_at_ms >= 0 && now_ms() > expire_at_ms) return;
+  set(key, value);
+  if (expire_at_ms >= 0) {
+    bool inserted = false;
+    set_deadline(key, *table_->find_or_insert(key, &inserted), expire_at_ms);
+  }
+}
+
+void Store::for_each_live(const std::function<void(std::string_view, const Entry&)>& fn) {
+  const int64_t now = now_ms();
+  table_->for_each([&](std::string_view key, const Entry& entry) {
+    if (entry.expire_at_ms >= 0 && now > entry.expire_at_ms) return;
+    fn(key, entry);
+  });
+}
+
 const std::string* Store::get(std::string_view key) {
   Entry* e = lookup(key);
   return e == nullptr ? nullptr : &e->value;

@@ -31,7 +31,7 @@ void Connection::on_event(uint32_t events) {
     close_now();
     return;
   }
-  advance();
+  server_.defer(this);
 }
 
 // One read per wakeup: level triggering re-reports any remainder, so a busy
@@ -78,16 +78,26 @@ bool Connection::flush_output() {
   return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
 }
 
-void Connection::advance() {
+void Connection::process() {
+  if (closed_) return;
+  if (paused_ && out_.size() <= kOutLowWater) paused_ = false;
+  if (!paused_ && !close_after_flush_) process_input();
+}
+
+void Connection::finish() {
+  if (closed_) return;
   while (true) {
-    if (paused_ && out_.size() <= kOutLowWater) paused_ = false;
-    if (!paused_ && !close_after_flush_) process_input();
     if (!flush_output()) {
       close_now();
       return;
     }
-    // Stay here while buffered requests can run: no new EPOLLIN will announce them.
     if (!paused_ || out_.size() > kOutLowWater) break;
+    // Drained enough to resume. Stay here while buffered requests can run:
+    // no new EPOLLIN will announce them. Their effects must be durable
+    // before the next flush sends the replies.
+    paused_ = false;
+    if (!close_after_flush_) process_input();
+    executor_.commit();
   }
   if (out_.empty() && (close_after_flush_ || peer_done_)) {
     close_now();

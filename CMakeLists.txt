@@ -57,6 +57,10 @@ add_executable(kvserver
   src/engine/hash_table.cpp
   src/engine/store.cpp
   src/engine/dispatcher.cpp
+  src/persist/fileutil.cpp
+  src/persist/wal.cpp
+  src/persist/snapshot.cpp
+  src/persist/persistence.cpp
 )
 target_include_directories(kvserver PRIVATE src)
 target_link_libraries(kvserver PRIVATE Threads::Threads)

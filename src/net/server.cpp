@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -51,6 +52,7 @@ Server::Server(EventLoop& loop, CommandExecutor& executor, const std::string& bi
     spare_fd_ = open_spare_fd();
     if (spare_fd_ < 0) throw sys_error("open /dev/null");
     if (!loop_.add(listen_fd_, EPOLLIN, this)) throw sys_error("epoll add");
+    loop_.set_after_events([this] { end_of_batch(); });
   } catch (...) {
     ::close(listen_fd_);
     if (spare_fd_ >= 0) ::close(spare_fd_);
@@ -96,7 +98,28 @@ void Server::shed_one_client() {
   spare_fd_ = open_spare_fd();
 }
 
+void Server::defer(Connection* connection) {
+  if (connection->queued()) return;
+  connection->set_queued(true);
+  pending_.push_back(connection);
+}
+
+// Group commit: run every queued connection's commands, make them durable
+// with one executor commit(), and only then send the replies.
+void Server::end_of_batch() {
+  if (pending_.empty()) return;
+  std::vector<Connection*> batch;
+  batch.swap(pending_);
+  for (Connection* c : batch) {
+    c->set_queued(false);
+    c->process();
+  }
+  executor_.commit();
+  for (Connection* c : batch) c->finish();
+}
+
 void Server::release(Connection* connection) {
+  pending_.erase(std::remove(pending_.begin(), pending_.end(), connection), pending_.end());
   auto it = connections_.find(connection);
   if (it == connections_.end()) return;
   loop_.retire(std::move(it->second));
