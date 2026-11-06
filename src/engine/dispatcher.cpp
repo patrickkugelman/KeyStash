@@ -37,7 +37,7 @@ void write_unknown_command(const std::vector<std::string_view>& args, net::Buffe
 const Dispatcher::Command Dispatcher::kCommands[] = {
     {"ping", -1, &Dispatcher::ping},   {"set", -3, &Dispatcher::set},
     {"get", 2, &Dispatcher::get},      {"del", -2, &Dispatcher::del},
-    {"exists", -2, &Dispatcher::exists},
+    {"exists", -2, &Dispatcher::exists}, {"echo", 2, &Dispatcher::echo},
 };
 
 void Dispatcher::execute(const Args& args, net::Buffer& out) {
@@ -64,6 +64,9 @@ void Dispatcher::ping(const Args& args, net::Buffer& out) {
     proto::write_simple(out, "PONG");
   }
 }
+
+// redis-cli --pipe ends its stream with ECHO <marker> and waits for the reply.
+void Dispatcher::echo(const Args& args, net::Buffer& out) { proto::write_bulk(out, args[1]); }
 
 void Dispatcher::set(const Args& args, net::Buffer& out) {
   if (args.size() != 3) {

@@ -16,6 +16,7 @@ class Dispatcher : public net::CommandExecutor {
   using Args = std::vector<std::string_view>;
 
   void ping(const Args& args, net::Buffer& out);
+  void echo(const Args& args, net::Buffer& out);
   void set(const Args& args, net::Buffer& out);
   void get(const Args& args, net::Buffer& out);
   void del(const Args& args, net::Buffer& out);
